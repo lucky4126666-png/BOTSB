@@ -1,27 +1,9 @@
 
-const TOKEN = "TOKE BOT TELEGRAM";
+const TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
 const API_URL = `https://api.telegram.org/bot${TOKEN}`;
-const SHEET_ID = "TUY KO CNF THIẾT NHƯNG HÃY THÊM";
+const SHEET_ID = "YOUR_SHEET_ID";
 const ADMIN_IDS = ["123456789", "987654321"]; // Thay các dãy số ở trong bằng id telegram của bạn
 
-function setWebhook() {
-	// URL TRIỂN KHAI
-  var webAppUrl = 'https://';
-  
-  var payload = {
-    method: 'setWebhook',
-    url: webAppUrl
-  };
-
-  var options = {
-    method: 'post',
-    payload: JSON.stringify(payload),
-    contentType: 'application/json'
-  };
-
-  var response = UrlFetchApp.fetch(API_URL + '/', options);
-  Logger.log(response.getContentText());
-}
 function doPost(e) {
   const { message } = JSON.parse(e.postData.contents);
   const chatId = message.chat.id;
@@ -41,7 +23,7 @@ if (!isCommand(text)) {
   } else if (text.startsWith("/addusers") || text.startsWith("/delusers")) {
     if (!isAdmin(userId)) {
       sendMessage(chatId, "🚫 Bạn không phải là admin.");
-      return; 
+      return;
     }
     manageUsers(chatId, userId, text);
   } else {
@@ -49,11 +31,9 @@ if (!isCommand(text)) {
       handleReport(chatId, text);
     } else if (text.startsWith("/reset")) {
       resetSheet(chatId);
-    } else if (text.startsWith("/giavang")) {
-      sendMessage(chatId, getGoldPrices());
     } else if (text.startsWith("/undo")) {
       undoLast(chatId);
-    }  else {
+    } else {
       const transactionPattern = /^[0-9]+(k|tr)?\s+(thu|chi)\s+.+/i;
     if (transactionPattern.test(text)) {
       handleTransaction(chatId, text);
@@ -64,7 +44,7 @@ if (!isCommand(text)) {
 function isCommand(text) {
   if (!text) return false;
   
-  const validCommands = ["/start", "/addusers", "/delusers", "/report", "/giavang", "/reset", "/reportday", "/undo"];
+  const validCommands = ["/start", "/addusers", "/delusers", "/report", "/reset", "/undo"];
   if (validCommands.some(cmd => text.startsWith(cmd))) {
     return true;
   }
@@ -92,14 +72,12 @@ function sendStartMessage(chatId) {
       `📌 *Hướng dẫn sử dụng:*\n\n` +
       `1️⃣ *Thêm giao dịch:*\n   _Nhập theo cú pháp:_ <số tiền> <thu/chi> <mô tả>.\n` +
         `   *Ví dụ:* \`14629k thu Lương t1\`\n\n` +
-      `2️⃣. *Xem báo cáo:*\n` +
-					`   - \`/giavang\`: Xem giá vàng SJC time life.\n` +
+              `2. *Xem báo cáo:*\n` +
         `   - \`/report\`: Báo cáo tổng.\n` +
         `   - \`/report mm/yyyy\`: Báo cáo tháng.\n` +
         `   - \`/report dd/mm/yyyy\`: Báo cáo tuần (hiển thị tuần có ngày được chọn).\n` +
-					`   - \`/reportday dd/mm/yyyy\`: Báo cáo ngày.\n` +
         `   - Thêm "az" hoặc "za" sau lệnh để sắp xếp:\n` +
-        `     *Ví dụ:* \`/report az\` , \`/report 01/2024 za, /reportday 04/05/2024 za.\`\n\n` +
+        `     *Ví dụ:* \`/report az\` hoặc \`/report 01/2024 za\`\n\n` +
       `3️⃣ *Quản lý người dùng(chỉ Admin):*\n` +
       `   - \`/addusers <id>\`: _Thêm user._\n` +
       `   - \`/delusers <id>\`: _Xóa user._\n\n` +
@@ -228,10 +206,6 @@ function removeUser(chatId, targetUserId) {
   sendMessage(chatId, `✅ Đã xóa người dùng với ID ${targetUserId}.`);
 }
 function handleReport(chatId, text) {
-  if (text.startsWith("/reportday")) {
-    handleReportDay(chatId, text);
-    return; 
-		}
   const dateRegex = /\d{2}\/\d{4}|\d{2}\/\d{2}\/\d{4}/;
   const dateParam = text.match(dateRegex)?.[0];
   let filter = "all";
@@ -351,109 +325,6 @@ if (type === "thu") {
 
   sendMessage(chatId, report);
 }
-function handleReportDay(chatId, text) {
-  const dateRegex = /(\d{2})\/(\d{2})\/(\d{4})/;
-  const match = text.match(dateRegex);
-  
-  let targetDate;
-
-  if (!match) {
-    targetDate = new Date();
-  } else {
-    const [_, day, month, year] = match;
-    targetDate = new Date(year, month - 1, day);
-    
-    if (isNaN(targetDate.getTime())) {
-      sendMessage(chatId, "⚠️ *Ngày không hợp lệ:* Vui lòng kiểm tra lại ngày tháng\nVí dụ: /reportday 15/05/2023");
-      return;
-    }
-  }
-
-  let sortOrder = null;
-  if (text.includes(" az")) {
-    sortOrder = "az";
-  } else if (text.includes(" za")) {
-    sortOrder = "za";
-  }
-
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("transactions");
-  if (!sheet) {
-    sendMessage(chatId, "⚠️ *Lỗi:* Không tìm thấy sheet `transactions`.");
-    return;
-  }
-  
-  const data = sheet.getDataRange().getValues().slice(1);
-  
-  if (!data.length) {
-    sendMessage(chatId, "📊 *Thông báo:* Không có dữ liệu giao dịch nào.");
-    return;
-  }
-
-  let filteredData = data.filter(([date]) => {
-    const transDate = new Date(date);
-    return (
-      transDate.getDate() === targetDate.getDate() &&
-      transDate.getMonth() === targetDate.getMonth() &&
-      transDate.getFullYear() === targetDate.getFullYear()
-    );
-  });
-
-  if (sortOrder) {
-    filteredData.sort((a, b) => {
-      const amountA = a[2];
-      const amountB = b[2];
-      return sortOrder === "az" ? amountA - amountB : amountB - amountA;
-    });
-  }
-
-  const incomeTransactions = [];
-  const expenseTransactions = [];
-  let [income, expense] = [0, 0];
-
-  filteredData.forEach(([date, type, amount, desc]) => {
-    const formattedTime = new Date(date).toLocaleString("vi-VN", {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    });
-
-    const transaction = `- \`${formatCurrency(amount)}\` : ${desc || "Không có mô tả"} | \`${formattedTime}\``;
-
-    if (type === "thu") {
-      income += amount;
-      incomeTransactions.push(transaction);
-    } else if (type === "chi") {
-      expense += amount;
-      expenseTransactions.push(transaction);
-    }
-  });
-
-  const formattedDate = targetDate.toLocaleDateString("vi-VN");
-  const balance = income - expense;
-  const balanceIcon = balance >= 0 ? "📈" : "📉";
-
-  const report = [
-    `📊 *BÁO CÁO NGÀY ${formattedDate}*`,
-    "",
-    "💰 *TỔNG QUAN*",
-    `├─ 📥 Thu nhập: \`${formatCurrency(income)}\``,
-    `├─ 📤 Chi tiêu: \`${formatCurrency(expense)}\``,
-    `└─ ${balanceIcon} Cân đối: \`${formatCurrency(balance)}\``,
-    "",
-    "📋 *CHI TIẾT*",
-    "",
-    "📥 *Giao dịch thu nhập:*",
-    incomeTransactions.length ? incomeTransactions.join("\n") : "      💬 Không có giao dịch thu nhập",
-    "",
-    "📤 *Giao dịch chi tiêu:*",
-    expenseTransactions.length ? expenseTransactions.join("\n") : "      💬 Không có giao dịch chi tiêu",
-    "",
-    `💡 *Tổng số giao dịch:* ${filteredData.length}`,
-	sortOrder ? `🔄 *Sắp xếp:* ${sortOrder === "az" ? "Tăng dần (az)" : "Giảm dần (za)"}` : "",
-	].filter(Boolean).join("\n");
-
-  sendMessage(chatId, report);
-}
 function resetSheet(chatId) {
   try {
 if (!isAdmin(chatId)) {
@@ -569,42 +440,4 @@ function splitMessage(text, maxLength) {
   parts.push(text);
   return parts;
 }
-//Giá vàng
 
-function getGoldPrices() {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("goldprices");
-  const randomValue = new Date().getTime();
-
-  sheet.getRange("F2").setValue(randomValue);
-  const url = `https://data.giavangvietnam.com/api/data/sjc?cache=${randomValue}`;
-  sheet.getRange("A1").setFormula(`=IMPORTHTML("${url}"; "table"; 1)`);
-
-  const data = sheet.getRange("A1:E25").getValues();
-
-  let report = `*🔔 Giá Vàng SJC 🔔*\n`;
-		   report += `${data[0][0]}\n`;
-  let currentRegion = '';
-
-  for (let i = 2; i < data.length; i++) {
-    const [regionCell, type, buy, sell] = data[i];
-
-    
-    if (regionCell && regionCell !== currentRegion) {
-      currentRegion = regionCell;
-      report += `\n*🏷️${currentRegion}*\n`;
-    }
-
-    if (type && buy && sell) {
-		 const buyPrice = buy.split('\n')[0];
-    const sellPrice = sell.split('\n')[0];
-		const buyDiff = buy.split('\n')[1] || '';
-		const sellDiff = sell.split('\n')[1] || '';
-    report += `- *${type}*\n`;
-    report += `    • Mua vào: ${buyPrice} ${buyDiff}\n`;
-    report += `    • Bán ra: ${sellPrice} ${sellDiff}\n`;
-     
-    }
-  }
-
-  return report.trim();
-}

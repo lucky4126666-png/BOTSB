@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-BOT_TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8464183339:AAEUNadM4MOUt_dFhpeLDlfp1JlYBqNJZ4E"
 
 ADMIN_ID = {8572604188}  # <<< ID TELEGRAM CỦA BẠN (DUY NHẤT)
 ADMIN_USERNAME = "@qitianlong777"

@@ -1,43 +1,58 @@
-import os
 from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, filters
 )
 
-# ================= CONFIG =================
+# ================== CONFIG ==================
 BOT_TOKEN = "8464183339:AAEUNadM4MOUt_dFhpeLDlfp1JlYBqNJZ4E"
-
-ADMIN_ID = {8572604188}  # <<< ID TELEGRAM CỦA BẠN (DUY NHẤT)
+ADMIN_ID = 8572604188  # ID của BẠN (duy nhất)
 ADMIN_USERNAME = "@qitianlong777"
 
-# ================= DATA =================
+# ================== DATA (RAM) ==================
 DATA = {
-    "lang": "VN",
     "wallet": None,
     "wallet_img": None,
     "bank": None,
     "bank_img": None
 }
 
-# ================= TEXT =================
-TEXT = {
-    "VN": {
+# dữ liệu chờ xem trước
+PREVIEW = {}
+
+# ================== LANGUAGE ==================
+LANG = {
+    "vn": {
         "title": "🤖 BOT TRỢ LÝ THANH TOÁN",
+        "wallet": "💳 Ví USDT (TRC20)",
+        "bank": "🏦 Số tài khoản",
+        "admin": "👑 Admin",
+        "edit_wallet": "✏️ Sửa ví USDT",
+        "edit_bank": "✏️ Sửa STK",
+        "preview": "👁 Xem trước",
+        "back": "⬅️ Quay lại",
+
+        "ask_wallet": (
+            "💳 CẬP NHẬT VÍ USDT (TRC20)\n\n"
+            "📌 Vui lòng gửi:\n"
+            "• ĐỊA CHỈ VÍ\n"
+            "• 01 ẢNH QR\n\n"
+            "➡️ Gửi ảnh + nhập địa chỉ vào CAPTION."
+        ),
+        "ask_bank": (
+            "🏦 CẬP NHẬT SỐ TÀI KHOẢN\n\n"
+            "📌 Vui lòng gửi:\n"
+            "• STK\n• Tên\n• Ngân hàng\n"
+            "• 01 ẢNH\n\n"
+            "➡️ Gửi ảnh + nhập nội dung vào CAPTION."
+        ),
+        "missing": "⚠️ Thiếu nội dung hoặc hình ảnh.\nVui lòng gửi lại ĐẦY ĐỦ.",
+        "saved": "✅ Đã cập nhật thành công.",
         "no_wallet": "⚠️ Chưa có ví USDT.\nVui lòng liên hệ admin.",
         "no_bank": "⚠️ Chưa có số tài khoản.\nVui lòng liên hệ admin.",
-        "edit_wallet": "💳 CẬP NHẬT VÍ USDT (TRC20)\n\n📌 Vui lòng gửi:\n• Địa chỉ ví\n• 01 hình ảnh QR",
-        "edit_bank": "🏦 CẬP NHẬT SỐ TÀI KHOẢN\n\n📌 Vui lòng gửi:\n• STK\n• Tên\n• Ngân hàng\n• 01 hình ảnh",
-        "missing": "⚠️ Thiếu thông tin hoặc hình ảnh.\nVui lòng gửi lại ĐẦY ĐỦ.",
-        "saved": "✅ Đã cập nhật thành công.",
+
         "warning": (
             "⚠️ LƯU Ý QUAN TRỌNG\n\n"
             "Chúng tôi CHỈ sử dụng DUY NHẤT:\n"
@@ -47,158 +62,219 @@ TEXT = {
             "❗ Nếu KHÁC nội dung bot gửi:\n"
             "→ KHÔNG chịu trách nhiệm\n"
             "→ Cảnh giác GIẢ MẠO / LỪA ĐẢO"
-        )
+        ),
+        "confirm": "✅ XÁC NHẬN",
+        "cancel": "❌ HỦY"
     },
-    "CN": {
+
+    "cn": {
         "title": "🤖 支付助手机器人",
-        "no_wallet": "⚠️ 尚未设置 USDT 钱包。\n请联系管理员。",
-        "no_bank": "⚠️ 尚未设置银行卡。\n请联系管理员。",
-        "edit_wallet": "💳 更新 USDT 钱包(TRC20)\n\n📌 请发送：\n• 钱包地址\n• 1 张二维码图片",
-        "edit_bank": "🏦 更新银行卡信息\n\n📌 请发送：\n• 卡号\n• 姓名\n• 银行\n• 1 张图片",
+        "wallet": "💳 USDT 钱包 (TRC20)",
+        "bank": "🏦 银行账户",
+        "admin": "👑 管理员",
+        "edit_wallet": "✏️ 修改钱包",
+        "edit_bank": "✏️ 修改银行卡",
+        "preview": "👁 预览",
+        "back": "⬅️ 返回",
+
+        "ask_wallet": (
+            "💳 更新 USDT 钱包 (TRC20)\n\n"
+            "📌 请发送：\n"
+            "• 钱包地址\n"
+            "• 1 张二维码图片\n\n"
+            "➡️ 图片 + 地址写在说明里。"
+        ),
+        "ask_bank": (
+            "🏦 更新银行卡信息\n\n"
+            "📌 请发送：\n"
+            "• 卡号\n• 姓名\n• 银行\n"
+            "• 1 张图片\n\n"
+            "➡️ 图片 + 信息写在说明里。"
+        ),
         "missing": "⚠️ 信息或图片不完整，请重新发送。",
         "saved": "✅ 更新成功。",
+        "no_wallet": "⚠️ 尚未设置 USDT 钱包。\n请联系管理员。",
+        "no_bank": "⚠️ 尚未设置银行账户。\n请联系管理员。",
+
         "warning": (
             "⚠️ 重要提示\n\n"
             "我们只使用唯一：\n"
-            "• 01 个 USDT 钱包(TRC20)\n"
-            "• 01 个银行账户\n\n"
+            "• 1 个 USDT(TRC20) 钱包\n"
+            "• 1 个银行账户\n\n"
             f"所有信息由管理员 {ADMIN_USERNAME} 确认。\n\n"
-            "❗ 若信息与机器人不同：\n"
+            "❗ 若与机器人信息不同：\n"
             "→ 概不负责\n"
             "→ 谨防诈骗"
-        )
+        ),
+        "confirm": "✅ 确认",
+        "cancel": "❌ 取消"
     }
 }
 
-# ================= KEYBOARD =================
-def main_menu():
+# ================== KEYBOARD ==================
+def main_menu(lang):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Ví USDT (TRC20)", callback_data="wallet")],
-        [InlineKeyboardButton("🏦 Số tài khoản", callback_data="bank")],
+        [InlineKeyboardButton(LANG[lang]["wallet"], callback_data="wallet")],
+        [InlineKeyboardButton(LANG[lang]["bank"], callback_data="bank")],
         [
             InlineKeyboardButton("🇻🇳 VN", callback_data="lang_vn"),
             InlineKeyboardButton("🇨🇳 CN", callback_data="lang_cn")
         ],
-        [InlineKeyboardButton("✏️ Admin", callback_data="admin")]
+        [InlineKeyboardButton(LANG[lang]["admin"], callback_data="admin")]
     ])
 
-def admin_menu():
+def admin_menu(lang):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Sửa ví USDT", callback_data="edit_wallet")],
-        [InlineKeyboardButton("✏️ Sửa STK", callback_data="edit_bank")],
-        [InlineKeyboardButton("👁 Xem trước", callback_data="preview")],
-        [InlineKeyboardButton("⬅️ Quay lại", callback_data="back")]
+        [InlineKeyboardButton(LANG[lang]["edit_wallet"], callback_data="edit_wallet")],
+        [InlineKeyboardButton(LANG[lang]["edit_bank"], callback_data="edit_bank")],
+        [InlineKeyboardButton(LANG[lang]["preview"], callback_data="preview")],
+        [InlineKeyboardButton(LANG[lang]["back"], callback_data="back")]
     ])
 
-# ================= START =================
+def confirm_kb(lang):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(LANG[lang]["confirm"], callback_data="confirm"),
+            InlineKeyboardButton(LANG[lang]["cancel"], callback_data="cancel")
+        ]
+    ])
+
+# ================== START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.chat_data.setdefault("lang", "vn")
+    l = context.chat_data["lang"]
     await update.message.reply_text(
-        TEXT[DATA["lang"]]["title"],
-        reply_markup=main_menu()
+        LANG[l]["title"],
+        reply_markup=main_menu(l)
     )
 
-# ================= CALLBACK =================
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================== CALLBACK ==================
+async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    lang = DATA["lang"]
+    l = context.chat_data.get("lang", "vn")
 
     if q.data == "wallet":
         if not DATA["wallet"]:
-            await q.message.reply_text(TEXT[lang]["no_wallet"])
+            await q.message.reply_text(LANG[l]["no_wallet"])
         else:
             await q.message.reply_photo(
-                photo=DATA["wallet_img"],
-                caption=f"💳 Ví USDT (TRC20)\n\n{DATA['wallet']}\n\n{TEXT[lang]['warning']}"
+                DATA["wallet_img"],
+                caption=f"💳 {LANG[l]['wallet']}\n\n{DATA['wallet']}\n\n{LANG[l]['warning']}"
             )
 
     elif q.data == "bank":
         if not DATA["bank"]:
-            await q.message.reply_text(TEXT[lang]["no_bank"])
+            await q.message.reply_text(LANG[l]["no_bank"])
         else:
             await q.message.reply_photo(
-                photo=DATA["bank_img"],
-                caption=f"🏦 Số tài khoản\n\n{DATA['bank']}\n\n{TEXT[lang]['warning']}"
+                DATA["bank_img"],
+                caption=f"🏦 {LANG[l]['bank']}\n\n{DATA['bank']}\n\n{LANG[l]['warning']}"
             )
 
     elif q.data == "lang_vn":
-        DATA["lang"] = "VN"
-        await q.message.edit_text(TEXT["VN"]["title"], reply_markup=main_menu())
+        context.chat_data["lang"] = "vn"
+        await q.message.edit_text(LANG["vn"]["title"], reply_markup=main_menu("vn"))
 
     elif q.data == "lang_cn":
-        DATA["lang"] = "CN"
-        await q.message.edit_text(TEXT["CN"]["title"], reply_markup=main_menu())
+        context.chat_data["lang"] = "cn"
+        await q.message.edit_text(LANG["cn"]["title"], reply_markup=main_menu("cn"))
 
-    elif q.data == "admin" and uid in ADMIN_ID:
-        await q.message.edit_text("👑 ADMIN", reply_markup=admin_menu())
+    elif q.data == "admin" and uid == ADMIN_ID:
+        await q.message.edit_text("👑 ADMIN", reply_markup=admin_menu(l))
 
-    elif q.data == "edit_wallet" and uid in ADMIN_ID:
+    elif q.data == "edit_wallet" and uid == ADMIN_ID:
         context.user_data["await_wallet"] = True
-        await q.message.reply_text(TEXT[lang]["edit_wallet"])
+        await q.message.reply_text(LANG[l]["ask_wallet"])
 
-    elif q.data == "edit_bank" and uid in ADMIN_ID:
+    elif q.data == "edit_bank" and uid == ADMIN_ID:
         context.user_data["await_bank"] = True
-        await q.message.reply_text(TEXT[lang]["edit_bank"])
+        await q.message.reply_text(LANG[l]["ask_bank"])
 
-    elif q.data == "preview":
+    elif q.data == "preview" and uid == ADMIN_ID:
         if DATA["wallet"]:
             await q.message.reply_photo(
-                photo=DATA["wallet_img"],
-                caption=f"{DATA['wallet']}\n\n{TEXT[lang]['warning']}"
+                DATA["wallet_img"],
+                caption=f"{DATA['wallet']}\n\n{LANG[l]['warning']}"
             )
 
+    elif q.data == "confirm" and uid == ADMIN_ID:
+        data = PREVIEW.pop(uid, None)
+        if data:
+            DATA.update(data)
+            context.user_data.clear()
+            await q.message.reply_text(LANG[l]["saved"])
+
+    elif q.data == "cancel" and uid == ADMIN_ID:
+        PREVIEW.pop(uid, None)
+        context.user_data.clear()
+        await q.message.reply_text("❌ Đã hủy.")
+
     elif q.data == "back":
-        await q.message.edit_text(TEXT[lang]["title"], reply_markup=main_menu())
+        await q.message.edit_text(LANG[l]["title"], reply_markup=main_menu(l))
 
-# ================= MESSAGE =================
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================== MESSAGE ==================
+async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    lang = DATA["lang"]
+    l = context.chat_data.get("lang", "vn")
 
-    # ADMIN UPDATE WALLET
-    if context.user_data.get("await_wallet") and uid in ADMIN_ID:
-        if update.message.text and update.message.photo:
-            DATA["wallet"] = update.message.text.strip()
-            DATA["wallet_img"] = update.message.photo[-1].file_id
-            context.user_data.clear()
-            await update.message.reply_text(TEXT[lang]["saved"])
+    text = update.message.text or update.message.caption
+    photo = update.message.photo
+
+    # ===== UPDATE WALLET =====
+    if context.user_data.get("await_wallet") and uid == ADMIN_ID:
+        if text and photo:
+            PREVIEW[uid] = {
+                "wallet": text.strip(),
+                "wallet_img": photo[-1].file_id
+            }
+            await update.message.reply_photo(
+                photo[-1].file_id,
+                caption=f"👁 {LANG[l]['preview']}\n\n{text}\n\n{LANG[l]['warning']}",
+                reply_markup=confirm_kb(l)
+            )
         else:
-            await update.message.reply_text(TEXT[lang]["missing"])
+            await update.message.reply_text(LANG[l]["missing"])
 
-    # ADMIN UPDATE BANK
-    elif context.user_data.get("await_bank") and uid in ADMIN_ID:
-        if update.message.text and update.message.photo:
-            DATA["bank"] = update.message.text.strip()
-            DATA["bank_img"] = update.message.photo[-1].file_id
-            context.user_data.clear()
-            await update.message.reply_text(TEXT[lang]["saved"])
+    # ===== UPDATE BANK =====
+    elif context.user_data.get("await_bank") and uid == ADMIN_ID:
+        if text and photo:
+            PREVIEW[uid] = {
+                "bank": text.strip(),
+                "bank_img": photo[-1].file_id
+            }
+            await update.message.reply_photo(
+                photo[-1].file_id,
+                caption=f"👁 {LANG[l]['preview']}\n\n{text}\n\n{LANG[l]['warning']}",
+                reply_markup=confirm_kb(l)
+            )
         else:
-            await update.message.reply_text(TEXT[lang]["missing"])
+            await update.message.reply_text(LANG[l]["missing"])
 
-    # AUTO KEYWORDS
+    # ===== AUTO KEYWORDS =====
     else:
-        text = update.message.text.lower() if update.message.text else ""
-        if any(k in text for k in ["ví", "trc20"]):
+        t = (update.message.text or "").lower()
+        if any(k in t for k in ["ví", "trc20"]):
             if DATA["wallet"]:
                 await update.message.reply_photo(
-                    photo=DATA["wallet_img"],
-                    caption=f"{DATA['wallet']}\n\n{TEXT[lang]['warning']}"
+                    DATA["wallet_img"],
+                    caption=f"{DATA['wallet']}\n\n{LANG[l]['warning']}"
                 )
-        elif any(k in text for k in ["stk", "thanh toán"]):
+        elif any(k in t for k in ["stk", "thanh toán"]):
             if DATA["bank"]:
                 await update.message.reply_photo(
-                    photo=DATA["bank_img"],
-                    caption=f"{DATA['bank']}\n\n{TEXT[lang]['warning']}"
+                    DATA["bank_img"],
+                    caption=f"{DATA['bank']}\n\n{LANG[l]['warning']}"
                 )
 
-# ================= RUN =================
+# ================== RUN ==================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.ALL, message_handler))
-    print("🤖 Bot trợ lý thanh toán đang chạy...")
+    app.add_handler(CallbackQueryHandler(cb))
+    app.add_handler(MessageHandler(filters.ALL, msg))
+    print("🤖 Assistant bot running…")
     app.run_polling()
 
 if __name__ == "__main__":

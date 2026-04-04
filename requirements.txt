@@ -1,2 +1,2 @@
 aiohttp
-aiogram
+aiogram>=3.0

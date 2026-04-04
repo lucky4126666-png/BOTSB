@@ -1,11 +1,18 @@
 import os, json, asyncio, uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ===== CONFIG =====
+# ===== ANTI MULTI INSTANCE =====
+LOCK_FILE = "/tmp/bot.lock"
+if os.path.exists(LOCK_FILE):
+    print("⚠️ Bot already running → exit")
+    exit()
+open(LOCK_FILE, "w").close()
+
+# ===== CONFIG (GIỮ NGUYÊN) =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", OWNER_ID))
@@ -67,9 +74,9 @@ SESSIONS = set()
 def check_login(request):
     return request.cookies.get("session") in SESSIONS
 
-# ===== TIME =====
+# ===== TIME (FIX UTC WARNING) =====
 def get_now():
-    return datetime.utcnow() + timedelta(hours=7)
+    return datetime.now(timezone.utc) + timedelta(hours=7)
 
 # ===== PERMISSION =====
 def is_admin(uid):
@@ -95,21 +102,40 @@ def build_buttons(text):
     if row: rows.append(row)
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
+# ===== QUEUE (ANTI TELEGRAM RATE LIMIT) =====
+SEND_QUEUE = asyncio.Queue()
+
+async def sender():
+    while True:
+        func, args = await SEND_QUEUE.get()
+        try:
+            await func(*args)
+            await asyncio.sleep(0.8)  # chống spam API
+        except Exception as e:
+            print("SEND ERROR:", e)
+        SEND_QUEUE.task_done()
+
 # ===== SCHEDULER =====
 async def scheduler():
     while True:
         now = get_now().strftime("%H:%M")
 
-        for job in schedules:
+        for job in schedules[:]:
             try:
                 if job["time"] == now and job.get("last_run") != now:
 
                     markup = build_buttons(job.get("button"))
 
                     if job.get("image"):
-                        await bot.send_photo(job["chat_id"], job["image"], caption=job["text"], reply_markup=markup)
+                        await SEND_QUEUE.put((
+                            bot.send_photo,
+                            (job["chat_id"], job["image"], job["text"], markup)
+                        ))
                     else:
-                        await bot.send_message(job["chat_id"], job["text"], reply_markup=markup)
+                        await SEND_QUEUE.put((
+                            bot.send_message,
+                            (job["chat_id"], job["text"], markup)
+                        ))
 
                     job["last_run"] = now
 
@@ -120,7 +146,7 @@ async def scheduler():
                 print("SCHEDULE ERROR:", e)
 
         save_schedule(schedules)
-        await asyncio.sleep(20)
+        await asyncio.sleep(15)
 
 # ===== BOT =====
 @dp.message(Command("start"))
@@ -138,10 +164,17 @@ async def handle(m: types.Message):
     if text in keywords:
         d = keywords[text]
         markup = build_buttons(d.get("button"))
+
         if d.get("image"):
-            await m.answer_photo(d["image"], caption=d["text"], reply_markup=markup)
+            await SEND_QUEUE.put((
+                m.answer_photo,
+                (d["image"], d["text"], markup)
+            ))
         else:
-            await m.answer(d["text"], reply_markup=markup)
+            await SEND_QUEUE.put((
+                m.answer,
+                (d["text"], markup)
+            ))
 
 # ===== LOGIN =====
 async def login_page(request):
@@ -269,9 +302,21 @@ app.router.add_get("/unban", unban)
 app.router.add_get("/add_schedule", add_schedule)
 app.router.add_get("/del_schedule", del_schedule)
 
+# ===== START BOT =====
 async def start_bot(app):
-    asyncio.create_task(dp.start_polling(bot))
+
+    async def run_bot():
+        while True:
+            try:
+                print("🚀 Bot polling...")
+                await dp.start_polling(bot)
+            except Exception as e:
+                print("BOT ERROR:", e)
+                await asyncio.sleep(5)
+
+    asyncio.create_task(run_bot())
     asyncio.create_task(scheduler())
+    asyncio.create_task(sender())
 
 app.on_startup.append(start_bot)
 

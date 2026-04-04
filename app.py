@@ -23,6 +23,9 @@ def is_logged(request):
     return request.cookies.get("session") in sessions
 
 # ===== KEYBOARD =====
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command
+
 def admin_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -30,13 +33,16 @@ def admin_kb():
             [KeyboardButton(text="❌ Xóa"), KeyboardButton(text="✏️ Sửa")],
             [KeyboardButton(text="👁 Preview")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        input_field_placeholder="Chọn chức năng..."
     )
 
-# ===== START =====
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("🔥 BOT CONTROL PANEL", reply_markup=admin_kb())
+    await message.answer(
+        "🔥 BOT CONTROL PANEL",
+        reply_markup=admin_kb()
+    )
 
 # ===== MAIN HANDLER =====
 @dp.message()

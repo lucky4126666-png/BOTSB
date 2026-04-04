@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
@@ -14,9 +15,51 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ===== DATA =====
-keywords = {}
+DATA_FILE = "data.json"
+
+# ===== LOAD DATA =====
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(keywords, f, ensure_ascii=False, indent=2)
+
+keywords = load_data()
 user_state = {}
+
+# ===== BUTTON =====
+def build_buttons(btn_text):
+    if not btn_text:
+        return None
+
+    buttons = []
+    row = []
+
+    for line in btn_text.split("\n"):
+        if "|" not in line:
+            continue
+
+        name, url = line.split("|", 1)
+        name = name.strip()
+        url = url.strip()
+
+        if not url.startswith("http"):
+            continue
+
+        row.append(InlineKeyboardButton(text=name, url=url))
+
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
+    if row:
+        buttons.append(row)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ===== MENU =====
 def menu():
@@ -35,9 +78,6 @@ def back():
 
 # ===== AI =====
 async def ask_ai(text):
-    if not OPENAI_API_KEY:
-        return "⚠️ Chưa cấu hình AI"
-
     try:
         res = client.chat.completions.create(
             model="gpt-4.1-mini",
@@ -47,9 +87,8 @@ async def ask_ai(text):
             ]
         )
         return res.choices[0].message.content
-    except Exception as e:
-        print("AI ERROR:", e)
-        return "⚠️ AI lỗi"
+    except:
+        return "🤖 AI lỗi"
 
 # ===== START =====
 @dp.message(Command("start"))
@@ -63,14 +102,11 @@ async def callback(call: types.CallbackQuery):
 
     if call.data == "add":
         user_state[uid] = {"step": "keyword"}
-        await call.message.edit_text(
-            "🔑 Nhập keyword\nVí dụ: vip",
-            reply_markup=back()
-        )
+        await call.message.edit_text("🔑 Nhập keyword", reply_markup=back())
 
     elif call.data == "list":
-        text = "\n".join(keywords.keys()) or "❌ Chưa có"
-        await call.message.edit_text(f"📋 KEYWORDS:\n{text}", reply_markup=back())
+        txt = "\n".join(keywords.keys()) or "❌ Chưa có"
+        await call.message.edit_text(txt, reply_markup=back())
 
     elif call.data == "delete":
         user_state[uid] = {"step": "delete"}
@@ -94,13 +130,13 @@ async def handle(message: types.Message):
     uid = message.from_user.id
     text = (message.text or "").strip()
 
-    # ===== STATE =====
     if uid in user_state:
         state = user_state[uid]
 
         # DELETE
         if state["step"] == "delete":
             keywords.pop(text.lower(), None)
+            save_data()
             user_state.pop(uid)
             await message.answer("🗑 Đã xóa", reply_markup=menu())
             return
@@ -116,25 +152,25 @@ async def handle(message: types.Message):
 
         # PREVIEW
         if state["step"] == "preview":
-            data = keywords.get(text.lower())
+            key = text.lower()
+            data = keywords.get(key)
+
             if not data:
                 await message.answer("❌ Không tồn tại")
                 return
 
-            markup = None
-            if data["button"]:
-                try:
-                    name, url = data["button"].split("|")
-                    markup = InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text=name.strip(), url=url.strip())]]
-                    )
-                except:
-                    pass
+            markup = build_buttons(data.get("button"))
 
-            if data["image"]:
-                await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
+            if data.get("image"):
+                msg = await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
             else:
-                await message.answer(data["text"], reply_markup=markup)
+                msg = await message.answer(data["text"], reply_markup=markup)
+
+            await asyncio.sleep(5)
+            try:
+                await msg.delete()
+            except:
+                pass
 
             user_state.pop(uid)
             return
@@ -143,13 +179,13 @@ async def handle(message: types.Message):
         if state["step"] == "keyword":
             state["keyword"] = text.lower()
             state["step"] = "text"
-            await message.answer("📝 Nhập nội dung")
+            await message.answer("Nhập nội dung")
             return
 
         if state["step"] == "text":
             state["text"] = text
             state["step"] = "image"
-            await message.answer("🖼 Gửi ảnh hoặc 'skip'")
+            await message.answer("Gửi ảnh hoặc 'skip'")
             return
 
         if state["step"] == "image":
@@ -158,11 +194,10 @@ async def handle(message: types.Message):
             elif message.photo:
                 state["image"] = message.photo[-1].file_id
             else:
-                await message.answer("❌ gửi ảnh hoặc skip")
-                return
+                return await message.answer("❌ gửi ảnh hoặc skip")
 
             state["step"] = "button"
-            await message.answer("🔗 Nhập: Tên | https://link hoặc skip")
+            await message.answer("Nhập nút (mỗi dòng: tên | link)")
             return
 
         if state["step"] == "button":
@@ -176,8 +211,9 @@ async def handle(message: types.Message):
                 "button": state["button"]
             }
 
+            save_data()
             user_state.pop(uid)
-            await message.answer(f"✅ Lưu: {key}", reply_markup=menu())
+            await message.answer("✅ Lưu xong", reply_markup=menu())
             return
 
     # ===== KEYWORD =====
@@ -185,18 +221,9 @@ async def handle(message: types.Message):
 
     if key in keywords:
         data = keywords[key]
+        markup = build_buttons(data.get("button"))
 
-        markup = None
-        if data["button"]:
-            try:
-                name, url = data["button"].split("|")
-                markup = InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text=name.strip(), url=url.strip())]]
-                )
-            except:
-                pass
-
-        if data["image"]:
+        if data.get("image"):
             await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
         else:
             await message.answer(data["text"], reply_markup=markup)
@@ -208,7 +235,7 @@ async def handle(message: types.Message):
 
 # ===== WEB =====
 async def index(request):
-    return web.Response(text="BOT RUNNING", content_type="text/html")
+    return web.Response(text="BOT OK")
 
 app = web.Application()
 app.router.add_get("/", index)
@@ -220,5 +247,4 @@ async def start_bot(app):
 app.on_startup.append(start_bot)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    web.run_app(app, host="0.0.0.0", port=port)
+    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

@@ -38,11 +38,11 @@ def admin_kb():
     )
 
 @dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer(
-        "🔥 BOT CONTROL PANEL",
-        reply_markup=admin_kb()
-    )
+await message.answer(
+    "🔥 MENU",
+    reply_markup=admin_kb(),
+    reply=False
+)
 
 # ===== MAIN HANDLER =====
 @dp.message()

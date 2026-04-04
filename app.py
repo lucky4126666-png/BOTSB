@@ -3,12 +3,13 @@ import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 
 # ===== CONFIG =====
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "123456")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -16,66 +17,63 @@ dp = Dispatcher()
 # ===== DATA =====
 keywords = {}
 user_state = {}
-sessions = set()
 
-# ===== AUTH =====
-def is_logged(request):
-    return request.cookies.get("session") in sessions
+# ===== INLINE MENU =====
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Thêm", callback_data="add")],
+        [InlineKeyboardButton(text="📋 Danh sách", callback_data="list")],
+        [InlineKeyboardButton(text="✏️ Sửa", callback_data="edit")],
+        [InlineKeyboardButton(text="❌ Xóa", callback_data="delete")],
+        [InlineKeyboardButton(text="👁 Preview", callback_data="preview")]
+    ])
 
-# ===== KEYBOARD =====
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
+def back_btn():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="back")]
+    ])
 
-def admin_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Thêm"), KeyboardButton(text="📋 Danh sách")],
-            [KeyboardButton(text="❌ Xóa"), KeyboardButton(text="✏️ Sửa")],
-            [KeyboardButton(text="👁 Preview")]
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Chọn chức năng..."
-    )
-
+# ===== START =====
 @dp.message(Command("start"))
-await message.answer(
-    "🔥 MENU",
-    reply_markup=admin_kb(),
-    reply=False
-)
+async def start(message: types.Message):
+    await message.answer("🚀 CONTROL PANEL", reply_markup=main_menu())
 
-# ===== MAIN HANDLER =====
+# ===== CALLBACK MENU =====
+@dp.callback_query()
+async def menu_handler(call: types.CallbackQuery):
+    uid = call.from_user.id
+
+    if call.data == "add":
+        user_state[uid] = {"step": "keyword"}
+        await call.message.edit_text("🔑 Nhập keyword:", reply_markup=back_btn())
+
+    elif call.data == "list":
+        text = "\n".join(keywords.keys()) or "❌ Chưa có"
+        await call.message.edit_text(f"📋 KEYWORDS:\n{text}", reply_markup=back_btn())
+
+    elif call.data == "delete":
+        user_state[uid] = {"step": "delete"}
+        await call.message.edit_text("Nhập keyword cần xóa:", reply_markup=back_btn())
+
+    elif call.data == "edit":
+        user_state[uid] = {"step": "edit"}
+        await call.message.edit_text("Nhập keyword cần sửa:", reply_markup=back_btn())
+
+    elif call.data == "preview":
+        user_state[uid] = {"step": "preview"}
+        await call.message.edit_text("Nhập keyword:", reply_markup=back_btn())
+
+    elif call.data == "back":
+        user_state.pop(uid, None)
+        await call.message.edit_text("🚀 CONTROL PANEL", reply_markup=main_menu())
+
+# ===== TEXT / STATE =====
 @dp.message()
 async def handle(message: types.Message):
     uid = message.from_user.id
     text = (message.text or "").strip()
 
-    # ===== MENU =====
-    if text == "➕ Thêm":
-        user_state[uid] = {"step": "keyword"}
-        await message.answer("🔑 Nhập keyword:")
-        return
-
-    if text == "📋 Danh sách":
-        await message.answer("\n".join(keywords.keys()) or "❌ Chưa có")
-        return
-
-    if text == "❌ Xóa":
-        user_state[uid] = {"step": "delete"}
-        await message.answer("Nhập keyword cần xóa:")
-        return
-
-    if text == "✏️ Sửa":
-        user_state[uid] = {"step": "edit"}
-        await message.answer("Nhập keyword cần sửa:")
-        return
-
-    if text == "👁 Preview":
-        user_state[uid] = {"step": "preview"}
-        await message.answer("Nhập keyword:")
-        return
-
-    # ===== STATE FLOW =====
+    # ===== STATE =====
     if uid in user_state:
         state = user_state[uid]
 
@@ -83,7 +81,7 @@ async def handle(message: types.Message):
         if state["step"] == "delete":
             keywords.pop(text, None)
             user_state.pop(uid)
-            await message.answer("🗑 Đã xóa")
+            await message.answer("🗑 Đã xóa", reply_markup=main_menu())
             return
 
         # EDIT
@@ -135,7 +133,7 @@ async def handle(message: types.Message):
             elif message.photo:
                 state["image"] = message.photo[-1].file_id
             else:
-                await message.answer("❌ gửi ảnh hoặc 'skip'")
+                await message.answer("❌ gửi ảnh hoặc skip")
                 return
 
             state["step"] = "button"
@@ -154,7 +152,7 @@ async def handle(message: types.Message):
             }
 
             user_state.pop(uid)
-            await message.answer(f"✅ Lưu: {key}")
+            await message.answer(f"✅ Lưu: {key}", reply_markup=main_menu())
             return
 
     # ===== AUTO REPLY =====
@@ -176,60 +174,19 @@ async def handle(message: types.Message):
 
     await message.answer("🤖 Bot đang chạy")
 
-# ===== WEB LOGIN =====
-async def login_page(request):
-    return web.Response(text="""
-    <html><body style="background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh">
-    <form method="post">
-    <h2>🔥 LOGIN</h2>
-    <input name="user"><br>
-    <input name="pass" type="password"><br>
-    <button>ENTER</button>
-    </form>
-    </body></html>
-    """, content_type="text/html")
-
-async def login(request):
-    data = await request.post()
-    if data.get("user") == ADMIN_USER and data.get("pass") == ADMIN_PASS:
-        sid = "ok"
-        sessions.add(sid)
-        res = web.HTTPFound("/")
-        res.set_cookie("session", sid)
-        return res
-    return web.Response(text="❌ sai")
-
-async def logout(request):
-    res = web.HTTPFound("/login")
-    res.del_cookie("session")
-    return res
-
-# ===== DASHBOARD =====
-async def home(request):
-    if not is_logged(request):
-        raise web.HTTPFound("/login")
-
-    return web.Response(text=f"""
-    <h1 style="color:red">🚀 MARS DASHBOARD</h1>
-    <p>Keywords: {len(keywords)}</p>
-    <a href="/logout">Logout</a>
-    """, content_type="text/html")
-
 # ===== WEB =====
-app = web.Application()
-app.router.add_get("/", home)
-app.router.add_get("/login", login_page)
-app.router.add_post("/login", login)
-app.router.add_get("/logout", logout)
+async def index(request):
+    return web.Response(text="BOT RUNNING", content_type="text/html")
 
-# ===== START BOT =====
+app = web.Application()
+app.router.add_get("/", index)
+
 async def start_bot(app):
     print("🔥 BOT STARTED")
     asyncio.create_task(dp.start_polling(bot))
 
 app.on_startup.append(start_bot)
 
-# ===== RUN =====
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     web.run_app(app, host="0.0.0.0", port=port)

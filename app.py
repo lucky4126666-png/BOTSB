@@ -1,7 +1,9 @@
 import os
 import asyncio
 from aiohttp import web
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 # ===== CONFIG =====
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -20,24 +22,27 @@ sessions = set()
 def is_logged(request):
     return request.cookies.get("session") in sessions
 
-# ===== BOT MENU =====
-def admin_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ Thêm", "📋 Danh sách")
-    kb.add("❌ Xóa", "✏️ Sửa")
-    kb.add("👁 Preview")
-    return kb
+# ===== KEYBOARD =====
+def admin_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Thêm"), KeyboardButton(text="📋 Danh sách")],
+            [KeyboardButton(text="❌ Xóa"), KeyboardButton(text="✏️ Sửa")],
+            [KeyboardButton(text="👁 Preview")]
+        ],
+        resize_keyboard=True
+    )
 
 # ===== START =====
-@dp.message(commands=["start"])
+@dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("🔥 BOT CONTROL", reply_markup=admin_keyboard())
+    await message.answer("🔥 BOT CONTROL PANEL", reply_markup=admin_kb())
 
-# ===== BOT HANDLER =====
+# ===== MAIN HANDLER =====
 @dp.message()
 async def handle(message: types.Message):
     uid = message.from_user.id
-    text = message.text
+    text = (message.text or "").strip()
 
     # ===== MENU =====
     if text == "➕ Thêm":
@@ -46,10 +51,7 @@ async def handle(message: types.Message):
         return
 
     if text == "📋 Danh sách":
-        if not keywords:
-            await message.answer("❌ Chưa có keyword")
-        else:
-            await message.answer("\n".join(keywords.keys()))
+        await message.answer("\n".join(keywords.keys()) or "❌ Chưa có")
         return
 
     if text == "❌ Xóa":
@@ -96,8 +98,8 @@ async def handle(message: types.Message):
 
             markup = None
             if data["button"]:
-                markup = types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("🔗 Link", url=data["button"])
+                markup = InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="🔗 Link", url=data["button"])]]
                 )
 
             if data["image"]:
@@ -122,20 +124,20 @@ async def handle(message: types.Message):
             return
 
         if state["step"] == "image":
-            if text == "skip":
+            if text.lower() == "skip":
                 state["image"] = None
             elif message.photo:
                 state["image"] = message.photo[-1].file_id
             else:
-                await message.answer("❌ gửi ảnh hoặc skip")
+                await message.answer("❌ gửi ảnh hoặc 'skip'")
                 return
 
             state["step"] = "button"
-            await message.answer("🔗 Nhập link hoặc skip:")
+            await message.answer("🔗 Nhập link hoặc 'skip':")
             return
 
         if state["step"] == "button":
-            state["button"] = None if text == "skip" else text
+            state["button"] = None if text.lower() == "skip" else text
 
             key = state.get("edit") or state["keyword"]
 
@@ -156,8 +158,8 @@ async def handle(message: types.Message):
 
         markup = None
         if data["button"]:
-            markup = types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton("🔗 Link", url=data["button"])
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔗 Link", url=data["button"])]]
             )
 
         if data["image"]:
@@ -171,16 +173,14 @@ async def handle(message: types.Message):
 # ===== WEB LOGIN =====
 async def login_page(request):
     return web.Response(text="""
-    <html>
-    <body style="background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh">
+    <html><body style="background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh">
     <form method="post">
     <h2>🔥 LOGIN</h2>
-    <input name="user" placeholder="user"><br>
-    <input name="pass" type="password" placeholder="pass"><br>
+    <input name="user"><br>
+    <input name="pass" type="password"><br>
     <button>ENTER</button>
     </form>
-    </body>
-    </html>
+    </body></html>
     """, content_type="text/html")
 
 async def login(request):
@@ -204,8 +204,7 @@ async def home(request):
         raise web.HTTPFound("/login")
 
     return web.Response(text=f"""
-    <h1>🚀 MARS DASHBOARD</h1>
-    <p>Users: {len(keywords)}</p>
+    <h1 style="color:red">🚀 MARS DASHBOARD</h1>
     <p>Keywords: {len(keywords)}</p>
     <a href="/logout">Logout</a>
     """, content_type="text/html")
@@ -217,7 +216,7 @@ app.router.add_get("/login", login_page)
 app.router.add_post("/login", login)
 app.router.add_get("/logout", logout)
 
-# ===== START =====
+# ===== START BOT =====
 async def start_bot(app):
     print("🔥 BOT STARTED")
     asyncio.create_task(dp.start_polling(bot))

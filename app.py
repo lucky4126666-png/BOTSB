@@ -14,26 +14,36 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 DATA_FILE = "data.json"
 
-# ===== LOAD DATA =====
-import tempfile
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except Exception as e:
+        print("LOAD ERROR:", e)
+        return {}
 
 def save_data():
     try:
-        with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
-            json.dump(keywords, tmp, ensure_ascii=False, indent=2)
-            temp_name = tmp.name
-
-        os.replace(temp_name, DATA_FILE)
-
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(keywords, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("SAVE ERROR:", e)
-        keywords = load_data()
 
+# 👉 PHẢI đặt dưới function
+keywords = load_data()
+
+# 👉 rồi mới check
 if not isinstance(keywords, dict):
     keywords = {}
+    
 # ===== BUTTON =====
 def build_buttons(btn_text):
     if not btn_text:

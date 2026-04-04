@@ -8,43 +8,43 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
 # ===== CONFIG =====
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-client = OpenAI(api_key=OPENAI_API_KEY)
+
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 DATA_FILE = "data.json"
 
+# ===== LOAD / SAVE SAFE =====
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
-
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             content = f.read().strip()
             if not content:
                 return {}
             return json.loads(content)
-    except Exception as e:
-        print("LOAD ERROR:", e)
+    except:
         return {}
 
 def save_data():
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(keywords, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("SAVE ERROR:", e)
+    except:
+        pass
 
-# 👉 PHẢI đặt dưới function
 keywords = load_data()
-
-# 👉 rồi mới check
 if not isinstance(keywords, dict):
     keywords = {}
-    
-# ===== BUTTON =====
+
+user_state = {}
+
+# ===== BUTTON BUILDER (SAFE) =====
 def build_buttons(btn_text):
     if not btn_text:
         return None
@@ -55,24 +55,26 @@ def build_buttons(btn_text):
     for line in btn_text.split("\n"):
         if "|" not in line:
             continue
+        try:
+            name, url = line.split("|", 1)
+            name = name.strip()
+            url = url.strip()
 
-        name, url = line.split("|", 1)
-        name = name.strip()
-        url = url.strip()
+            if not url.startswith("http"):
+                continue
 
-        if not url.startswith("http"):
+            row.append(InlineKeyboardButton(text=name, url=url))
+
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        except:
             continue
-
-        row.append(InlineKeyboardButton(text=name, url=url))
-
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
 
     if row:
         buttons.append(row)
 
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
 # ===== MENU =====
 def menu():
@@ -91,6 +93,8 @@ def back():
 
 # ===== AI =====
 async def ask_ai(text):
+    if not client:
+        return "🤖 AI chưa bật"
     try:
         res = client.chat.completions.create(
             model="gpt-4.1-mini",
@@ -137,114 +141,112 @@ async def callback(call: types.CallbackQuery):
         user_state.pop(uid, None)
         await call.message.edit_text("🚀 CONTROL PANEL", reply_markup=menu())
 
-# ===== HANDLE =====
+# ===== MAIN HANDLE =====
 @dp.message()
 async def handle(message: types.Message):
-    uid = message.from_user.id
-    text = (message.text or "").strip()
+    try:
+        uid = message.from_user.id
+        text = (message.text or "").strip()
 
-    if uid in user_state:
-        state = user_state[uid]
+        # ===== STATE =====
+        if uid in user_state:
+            state = user_state[uid]
 
-        # DELETE
-        if state["step"] == "delete":
-            keywords.pop(text.lower(), None)
-            save_data()
-            user_state.pop(uid)
-            await message.answer("🗑 Đã xóa", reply_markup=menu())
-            return
+            # DELETE
+            if state["step"] == "delete":
+                keywords.pop(text.lower(), None)
+                save_data()
+                user_state.pop(uid)
+                return await message.answer("🗑 Đã xóa", reply_markup=menu())
 
-        # EDIT
-        if state["step"] == "edit":
-            if text.lower() in keywords:
-                user_state[uid] = {"step": "keyword", "edit": text.lower()}
-                await message.answer("Nhập nội dung mới")
-            else:
-                await message.answer("❌ Không tồn tại")
-            return
+            # EDIT
+            if state["step"] == "edit":
+                key = text.lower()
+                if key in keywords:
+                    user_state[uid] = {"step": "keyword", "edit": key}
+                    return await message.answer("Nhập nội dung mới")
+                return await message.answer("❌ Không tồn tại")
 
-        # PREVIEW
-        if state["step"] == "preview":
-            key = text.lower()
-            data = keywords.get(key)
+            # PREVIEW
+            if state["step"] == "preview":
+                key = text.lower()
+                data = keywords.get(key)
 
-            if not data:
-                await message.answer("❌ Không tồn tại")
+                if not data:
+                    return await message.answer("❌ Không tồn tại")
+
+                markup = build_buttons(data.get("button"))
+
+                if data.get("image"):
+                    msg = await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
+                else:
+                    msg = await message.answer(data["text"], reply_markup=markup)
+
+                await asyncio.sleep(5)
+                try:
+                    await msg.delete()
+                except:
+                    pass
+
+                user_state.pop(uid)
                 return
 
+            # ADD FLOW
+            if state["step"] == "keyword":
+                state["keyword"] = text.lower()
+                state["step"] = "text"
+                return await message.answer("📝 Nhập nội dung")
+
+            if state["step"] == "text":
+                state["text"] = text
+                state["step"] = "image"
+                return await message.answer("🖼 Gửi ảnh hoặc 'skip'")
+
+            if state["step"] == "image":
+                if text.lower() == "skip":
+                    state["image"] = None
+                elif message.photo:
+                    state["image"] = message.photo[-1].file_id
+                else:
+                    return await message.answer("❌ gửi ảnh hoặc skip")
+
+                state["step"] = "button"
+                return await message.answer("🔗 Nhập nút (mỗi dòng: tên | link)")
+
+            if state["step"] == "button":
+                state["button"] = None if text.lower() == "skip" else text
+
+                key = state.get("edit") or state["keyword"]
+
+                keywords[key] = {
+                    "text": state["text"],
+                    "image": state["image"],
+                    "button": state["button"]
+                }
+
+                save_data()
+                user_state.pop(uid)
+                return await message.answer("✅ Lưu xong", reply_markup=menu())
+
+        # ===== KEYWORD =====
+        key = text.lower()
+
+        if key in keywords:
+            data = keywords[key]
             markup = build_buttons(data.get("button"))
 
             if data.get("image"):
-                msg = await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
+                return await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
             else:
-                msg = await message.answer(data["text"], reply_markup=markup)
+                return await message.answer(data["text"], reply_markup=markup)
 
-            await asyncio.sleep(5)
-            try:
-                await msg.delete()
-            except:
-                pass
+        # ===== AI =====
+        reply = await ask_ai(text)
+        await message.answer(reply)
 
-            user_state.pop(uid)
-            return
-
-        # ADD FLOW
-        if state["step"] == "keyword":
-            state["keyword"] = text.lower()
-            state["step"] = "text"
-            await message.answer("Nhập nội dung")
-            return
-
-        if state["step"] == "text":
-            state["text"] = text
-            state["step"] = "image"
-            await message.answer("Gửi ảnh hoặc 'skip'")
-            return
-
-        if state["step"] == "image":
-            if text.lower() == "skip":
-                state["image"] = None
-            elif message.photo:
-                state["image"] = message.photo[-1].file_id
-            else:
-                return await message.answer("❌ gửi ảnh hoặc skip")
-
-            state["step"] = "button"
-            await message.answer("Nhập nút (mỗi dòng: tên | link)")
-            return
-
-        if state["step"] == "button":
-            state["button"] = None if text.lower() == "skip" else text
-
-            key = state.get("edit") or state["keyword"]
-
-            keywords[key] = {
-                "text": state["text"],
-                "image": state["image"],
-                "button": state["button"]
-            }
-
-            save_data()
-            user_state.pop(uid)
-            await message.answer("✅ Lưu xong", reply_markup=menu())
-            return
-
-    # ===== KEYWORD =====
-    key = text.lower()
-
-    if key in keywords:
-        data = keywords[key]
-        markup = build_buttons(data.get("button"))
-
-        if data.get("image"):
-            await message.answer_photo(data["image"], caption=data["text"], reply_markup=markup)
-        else:
-            await message.answer(data["text"], reply_markup=markup)
-        return
-
-    # ===== AI =====
-    reply = await ask_ai(text)
-    await message.answer(reply)
+    except Exception as e:
+        print("ERROR:", e)
+        await message.answer("⚠️ Có lỗi xảy ra")
 
 # ===== WEB =====
 async def index(request):

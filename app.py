@@ -5,17 +5,17 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import Update
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # ===== CONFIG =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("BASE_URL")  # https://abc.up.railway.app
+BASE_URL = os.getenv("BASE_URL")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ===== FILE =====
 DATA_FILE = "data.json"
@@ -87,32 +87,34 @@ async def sender():
         await asyncio.sleep(0.3)
         QUEUE.task_done()
 
-# ===== SAFE TASK =====
+# ===== SAFE LOOP =====
 async def safe_loop(coro, name):
     while True:
         try:
-            print(f"🚀 {name} started")
+            print(f"🚀 {name} running")
             await coro()
         except Exception as e:
-            print(f"❌ {name} crashed:", e)
+            print(f"❌ {name} crash:", e)
             await asyncio.sleep(3)
 
 # ===== AI =====
+AI_SEMAPHORE = asyncio.Semaphore(5)
+
 async def ai_reply(text):
-    for _ in range(3):
-        try:
-            res = client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role":"system","content":"Trả lời ngắn gọn, thông minh, tiếng Việt"},
-                    {"role":"user","content":text}
-                ],
-                timeout=8
-            )
-            return res.choices[0].message.content
-        except Exception as e:
-            print("AI ERROR:", e)
-            await asyncio.sleep(1)
+    async with AI_SEMAPHORE:
+        for _ in range(3):
+            try:
+                res = await client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[
+                        {"role":"system","content":"Trả lời ngắn gọn, thông minh, tiếng Việt"},
+                        {"role":"user","content":text}
+                    ]
+                )
+                return res.choices[0].message.content
+            except Exception as e:
+                print("AI ERROR:", e)
+                await asyncio.sleep(1)
     return "⚠️ AI đang bận"
 
 # ===== BUTTON =====
@@ -157,7 +159,7 @@ async def scheduler():
         save_schedule(schedules)
         await asyncio.sleep(15)
 
-# ===== BOT HANDLER =====
+# ===== BOT =====
 @dp.message(Command("start"))
 async def start(m: types.Message):
     if not is_admin(m.from_user.id): return
@@ -219,12 +221,16 @@ async def stats(request):
 async def on_start(app):
     print("🚀 Starting bot...")
 
-    # FIX CONFLICT TRIỆT ĐỂ
+    # FIX conflict triệt để
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")
 
     asyncio.create_task(safe_loop(sender, "Sender"))
     asyncio.create_task(safe_loop(scheduler, "Scheduler"))
+
+# ===== SHUTDOWN =====
+async def on_shutdown(app):
+    await bot.session.close()
 
 # ===== APP =====
 app = web.Application()
@@ -234,6 +240,7 @@ app.router.add_get("/admin", admin)
 app.router.add_get("/api/stats", stats)
 
 app.on_startup.append(on_start)
+app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

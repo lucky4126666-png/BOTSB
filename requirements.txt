@@ -1,3 +1,7 @@
-aiohttp
-aiogram>=3.0
+fastapi
+uvicorn
+aiogram
+sqlalchemy
+asyncpg
 openai
+aiohttp

@@ -221,13 +221,19 @@ async def stats(request):
 async def on_start(app):
     print("🚀 Starting bot...")
 
-    # FIX conflict triệt để
+    if not BASE_URL:
+        print("❌ BASE_URL MISSING !!!")
+        return
+
+    webhook_url = f"{BASE_URL}/webhook"
+
+    print("🌐 WEBHOOK URL:", webhook_url)
+
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(f"{BASE_URL}/webhook")
+    await bot.set_webhook(webhook_url)
 
     asyncio.create_task(safe_loop(sender, "Sender"))
     asyncio.create_task(safe_loop(scheduler, "Scheduler"))
-
 # ===== SHUTDOWN =====
 async def on_shutdown(app):
     await bot.session.close()

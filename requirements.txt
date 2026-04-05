@@ -1,7 +1,7 @@
 fastapi
+uvicorn
 aiogram
 sqlalchemy
 asyncpg
-openai
 redis
-uvicorn
+openai>=1.0.0

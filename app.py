@@ -1,12 +1,11 @@
-import os, json
+import os, json, asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Text, select
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import Column, Integer, String, Text, select, delete
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,19 +22,6 @@ engine = create_async_engine(DATABASE_URL)
 SessionLocal = sessionmaker(engine, class_=AsyncSession)
 Base = declarative_base()
 
-scheduler = AsyncIOScheduler()
-scheduler.start()
-
-ADMINS = [123456789]
-
-# ===== DB =====
-class AutoPost(Base):
-    __tablename__ = "auto_post"
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(String)
-    text = Column(Text)
-    interval = Column(Integer)
-
 # ===== STATE =====
 user_state = {}
 temp = {}
@@ -44,156 +30,204 @@ def reset(uid):
     user_state.pop(uid, None)
     temp.pop(uid, None)
 
-# ===== UI =====
-def home_menu():
+# ===== BUTTON PARSER =====
+def parse_buttons(text):
+    if not text:
+        return None
+    rows = []
+    for line in text.split("\n"):
+        row = []
+        for part in line.split("&&"):
+            if "-" in part:
+                t, u = part.split("-", 1)
+                row.append({"text": t.strip(), "url": u.strip()})
+        if row:
+            rows.append(row)
+    return rows
+
+def build_buttons(data):
+    if not data:
+        return None
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 Auto Post", callback_data="post_menu")],
-        [InlineKeyboardButton(text="📖 Hướng dẫn", callback_data="guide")]
+        [InlineKeyboardButton(text=b["text"], url=b["url"]) for b in row]
+        for row in data
     ])
 
-def time_menu():
+# ===== MODELS =====
+class Keyword(Base):
+    __tablename__ = "keywords"
+    id = Column(Integer, primary_key=True)
+    key = Column(String)
+    text = Column(Text)
+    image = Column(Text)
+    button = Column(Text)
+
+class AutoPost(Base):
+    __tablename__ = "auto_post"
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String)
+    text = Column(Text)
+    image = Column(Text)
+    button = Column(Text)
+    interval = Column(Integer, default=10)
+    is_active = Column(Integer, default=0)
+    pin = Column(Integer, default=0)
+
+class Welcome(Base):
+    __tablename__ = "welcome"
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String)
+    text = Column(Text)
+    button = Column(Text)
+
+# ===== MENU =====
+def home():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="10 phút", callback_data="time_10")],
-        [InlineKeyboardButton(text="30 phút", callback_data="time_30")],
-        [InlineKeyboardButton(text="60 phút", callback_data="time_60")],
-        [InlineKeyboardButton(text="🔙 Menu", callback_data="home")]
+        [InlineKeyboardButton("📌 Từ khoá", callback_data="kw_menu")],
+        [InlineKeyboardButton("📅 Auto Post", callback_data="auto_menu")],
+        [InlineKeyboardButton("👋 Welcome", callback_data="wel_menu")]
     ])
 
 # ===== START =====
 @dp.message(F.text == "/start")
 async def start(m):
-    await m.answer("🚀 Menu chính", reply_markup=home_menu())
+    await m.answer("🚀 Menu", reply_markup=home())
 
-# ===== CALLBACK =====
-@dp.callback_query()
-async def cb(c):
-    uid = c.from_user.id
-    d = c.data
+# ======================
+# 📌 KEYWORD
+# ======================
 
-    if d == "home":
-        await c.message.edit_text("🏠 Menu chính", reply_markup=home_menu())
+@dp.callback_query(F.data == "kw_menu")
+async def kw_menu(c):
+    await c.message.edit_text("📌 Từ khoá", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("➕ Thêm", callback_data="kw_add")],
+        [InlineKeyboardButton("📋 Danh sách", callback_data="kw_list")],
+        [InlineKeyboardButton("🔙 Menu", callback_data="home")]
+    ]))
 
-    elif d == "guide":
-        await c.message.edit_text(
-            "📖 Hướng dẫn:\n\n"
-            "1. Tạo Auto Post\n"
-            "2. Nhập nội dung\n"
-            "3. Chọn thời gian\n"
-            "4. Lưu\n\n"
-            "👉 chỉ cần bấm nút",
-            reply_markup=home_menu()
-        )
+@dp.callback_query(F.data == "kw_add")
+async def kw_add(c):
+    user_state[c.from_user.id] = "kw_key"
+    temp[c.from_user.id] = {}
+    await c.message.edit_text("Nhập từ khoá")
 
-    elif d == "post_menu":
-        await c.message.edit_text(
-            "📅 Auto Post",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Tạo", callback_data="post_add")],
-                [InlineKeyboardButton(text="📋 Danh sách", callback_data="post_list")],
-                [InlineKeyboardButton(text="🔙 Menu", callback_data="home")]
-            ])
-        )
+@dp.callback_query(F.data == "kw_list")
+async def kw_list(c):
+    async with SessionLocal() as db:
+        kws = (await db.execute(select(Keyword))).scalars().all()
 
-    elif d == "post_add":
-        user_state[uid] = "post_text"
-        temp[uid] = {}
+    kb = []
+    for k in kws:
+        kb.append([
+            InlineKeyboardButton(k.key, callback_data=f"kw_view_{k.id}"),
+            InlineKeyboardButton("❌", callback_data=f"kw_del_{k.id}")
+        ])
 
-        await c.message.edit_text("📝 Nhập nội dung bài viết")
+    kb.append([InlineKeyboardButton("🔙", callback_data="home")])
+    await c.message.edit_text("Danh sách", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-    elif d.startswith("time_"):
-        minutes = int(d.split("_")[1])
-        temp[uid]["interval"] = minutes
+@dp.callback_query(F.data.startswith("kw_del_"))
+async def kw_del(c):
+    kid = int(c.data.split("_")[-1])
+    async with SessionLocal() as db:
+        await db.execute(delete(Keyword).where(Keyword.id == kid))
+        await db.commit()
+    await c.answer("Đã xoá")
 
-        data = temp[uid]
+# ======================
+# 📅 AUTO POST
+# ======================
 
-        await c.message.edit_text(
-            f"👁 Preview:\n\n{data['text']}\n\n⏱ {minutes} phút",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💾 Lưu", callback_data="post_save")],
-                [InlineKeyboardButton(text="❌ Huỷ", callback_data="home")]
-            ])
-        )
+@dp.callback_query(F.data == "auto_menu")
+async def auto_menu(c):
+    await c.message.edit_text("📅 Auto", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("➕ Tạo", callback_data="auto_add")],
+        [InlineKeyboardButton("📋 Danh sách", callback_data="auto_list")],
+        [InlineKeyboardButton("🔙", callback_data="home")]
+    ]))
 
-    elif d == "post_save":
-        data = temp[uid]
+@dp.callback_query(F.data == "auto_list")
+async def auto_list(c):
+    async with SessionLocal() as db:
+        posts = (await db.execute(select(AutoPost))).scalars().all()
 
+    kb = []
+    for p in posts:
+        kb.append([
+            InlineKeyboardButton(f"Post {p.id}", callback_data=f"auto_view_{p.id}"),
+            InlineKeyboardButton("❌", callback_data=f"auto_del_{p.id}")
+        ])
+
+    await c.message.edit_text("Danh sách auto", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("auto_del_"))
+async def auto_del(c):
+    pid = int(c.data.split("_")[-1])
+    async with SessionLocal() as db:
+        await db.execute(delete(AutoPost).where(AutoPost.id == pid))
+        await db.commit()
+    await c.answer("Đã xoá")
+
+# ======================
+# 👋 WELCOME
+# ======================
+
+@dp.callback_query(F.data == "wel_menu")
+async def wel_menu(c):
+    await c.message.edit_text("👋 Welcome", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("✏️ Sửa text", callback_data="wel_text")],
+        [InlineKeyboardButton("🔘 Sửa nút", callback_data="wel_btn")],
+        [InlineKeyboardButton("👁 Preview", callback_data="wel_preview")],
+        [InlineKeyboardButton("🔙", callback_data="home")]
+    ]))
+
+# ======================
+# 🤖 AUTO WORKER
+# ======================
+
+async def auto_worker():
+    while True:
         async with SessionLocal() as db:
-            db.add(AutoPost(
-                chat_id=str(c.message.chat.id),
-                text=data["text"],
-                interval=data["interval"]
-            ))
-            await db.commit()
+            posts = (await db.execute(select(AutoPost))).scalars().all()
 
-        scheduler.add_job(
-            send_post,
-            "interval",
-            minutes=data["interval"],
-            args=[c.message.chat.id, data["text"]]
-        )
+        for p in posts:
+            if p.is_active:
+                btn = build_buttons(parse_buttons(p.button))
+                if p.image:
+                    msg = await bot.send_photo(p.chat_id, p.image, caption=p.text or "", reply_markup=btn)
+                else:
+                    msg = await bot.send_message(p.chat_id, p.text or "", reply_markup=btn)
 
-        reset(uid)
+                if p.pin:
+                    try:
+                        await bot.pin_chat_message(p.chat_id, msg.message_id)
+                    except:
+                        pass
 
-        await c.message.edit_text("✅ Đã lưu auto post", reply_markup=home_menu())
+        await asyncio.sleep(60)
 
-    elif d == "post_list":
-        async with SessionLocal() as db:
-            res = await db.execute(select(AutoPost))
-            posts = res.scalars().all()
+# ======================
+# 🌐 WEBHOOK
+# ======================
 
-        txt = "\n".join([f"{p.id}. {p.text[:20]} ({p.interval}p)" for p in posts]) or "Chưa có"
-
-        await c.message.edit_text(
-            "📋 Danh sách:\n\n" + txt,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Menu", callback_data="home")]
-            ])
-        )
-
-    await c.answer()
-
-# ===== INPUT =====
-@dp.message()
-async def handle(m):
-    uid = m.from_user.id
-    state = user_state.get(uid)
-
-    if not state:
-        return
-
-    if state == "post_text":
-        temp[uid]["text"] = m.text
-        user_state[uid] = None
-
-        await m.answer("⏱ Chọn thời gian", reply_markup=time_menu())
-
-# ===== AUTO POST =====
-async def send_post(chat_id, text):
-    await bot.send_message(chat_id, text)
-
-# ===== WEB =====
-@app.get("/")
-async def home():
-    return RedirectResponse("/dashboard")
-
-@app.get("/dashboard")
-async def dash():
-    return {"status": "ok"}
-
-# ===== WEBHOOK =====
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
     await dp.feed_update(bot, types.Update(**data))
     return {"ok": True}
 
-# ===== STARTUP =====
+@app.get("/")
+async def root():
+    return RedirectResponse("/dashboard")
+
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    asyncio.create_task(auto_worker())
+
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")
 
-    print("🚀 BOT READY")
+    print("BOT READY")

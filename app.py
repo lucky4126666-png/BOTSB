@@ -193,10 +193,16 @@ async def process_message(m, text):
 async def webhook(request):
     try:
         data = await request.json()
+        print("🔥 UPDATE:", data)
+
         update = Update(**data)
-        asyncio.create_task(dp.feed_update(bot, update))
+
+        # FIX QUAN TRỌNG
+        await dp.feed_update(bot, update)
+
     except Exception as e:
-        print("WEBHOOK ERROR:", e)
+        print("❌ WEBHOOK ERROR:", e)
+
     return web.Response(text="ok")
 
 # ===== DASHBOARD =====

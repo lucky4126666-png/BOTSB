@@ -267,7 +267,14 @@ async def save(chat_id:str,data:dict):
         await db.commit()
 
     return {"ok":True}
+    
+    # ===== HOME PAGE =====
+from fastapi.responses import RedirectResponse
 
+@app.get("/")
+async def home():
+    return RedirectResponse(url="/dashboard")
+    
 # WEBHOOK
 @app.post("/webhook")
 async def webhook(req: Request):

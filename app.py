@@ -1,21 +1,21 @@
-import os, json, re, asyncio
+import os, json, re
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Text, select
-from openai import AsyncOpenAI
+from sqlalchemy import Column, Integer, String, Text, select, text as sql_text
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ===== ENV =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ===== INIT =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
@@ -24,9 +24,14 @@ engine = create_async_engine(DATABASE_URL)
 SessionLocal = sessionmaker(engine, class_=AsyncSession)
 Base = declarative_base()
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 scheduler = AsyncIOScheduler()
 scheduler.start()
+
+# ===== ADMIN =====
+ADMINS = [123456789]
+
+def is_admin(uid):
+    return uid in ADMINS
 
 # ===== MODELS =====
 class GroupConfig(Base):
@@ -42,9 +47,27 @@ class Keyword(Base):
     id = Column(Integer, primary_key=True)
     key = Column(String)
     text = Column(Text)
+    image = Column(Text)
     button = Column(Text)
 
-# ===== BUTTON SYSTEM =====
+class AutoPost(Base):
+    __tablename__ = "auto_post"
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String)
+    text = Column(Text)
+    image = Column(Text)
+    button = Column(Text)
+    interval = Column(Integer)
+
+# ===== STATE =====
+user_state = {}
+temp = {}
+
+def reset(uid):
+    user_state.pop(uid, None)
+    temp.pop(uid, None)
+
+# ===== BUTTON =====
 def smart_buttons(data=None, extra=None):
     rows = []
 
@@ -67,9 +90,21 @@ def smart_buttons(data=None, extra=None):
     if extra:
         rows.extend(extra)
 
-    rows.append([InlineKeyboardButton(text="🏠 Menu", callback_data="home")])
+    rows.append([
+        InlineKeyboardButton(text="🏠 Menu", callback_data="home"),
+        InlineKeyboardButton(text="📖 Hướng dẫn", callback_data="guide")
+    ])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# ===== SEND =====
+async def send_msg(m, text="", image=None, button=None):
+    markup = smart_buttons(button)
+
+    if image:
+        await m.answer_photo(photo=image, caption=text or "‎", reply_markup=markup)
+    else:
+        await m.answer(text or "‎", reply_markup=markup)
 
 # ===== MENU =====
 def home_menu():
@@ -78,32 +113,6 @@ def home_menu():
         [InlineKeyboardButton(text="👋 Lời chào", callback_data="welcome_menu")],
         [InlineKeyboardButton(text="📅 Auto Post", callback_data="post_menu")]
     ])
-
-# ===== DB =====
-async def get_cfg(chat_id):
-    async with SessionLocal() as db:
-        res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == str(chat_id)))
-        return res.scalar()
-
-async def get_keywords():
-    async with SessionLocal() as db:
-        res = await db.execute(select(Keyword))
-        return res.scalars().all()
-
-# ===== AI =====
-async def ai_reply(text):
-    resp = await client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "Trả lời tiếng Việt ngắn gọn"},
-            {"role": "user", "content": text}
-        ]
-    )
-    return resp.choices[0].message.content
-
-# ===== STATE =====
-user_state = {}
-temp = {}
 
 # ===== START =====
 @dp.message(F.text == "/start")
@@ -116,142 +125,141 @@ async def cb(c):
     d = c.data
     uid = c.from_user.id
 
-    # HOME
     if d == "home":
         await c.message.edit_text("🏠 Menu", reply_markup=home_menu())
 
-    # ===== KEYWORD =====
+    elif d == "guide":
+        await c.message.edit_text("📖 Hướng dẫn:\nBấm nút để sử dụng bot", reply_markup=home_menu())
+
     elif d == "kw_menu":
-        await c.message.edit_text(
-            "📌 Từ khoá",
-            reply_markup=smart_buttons(extra=[
-                [InlineKeyboardButton(text="➕ Thêm", callback_data="kw_add")],
-                [InlineKeyboardButton(text="📋 Danh sách", callback_data="kw_list")]
-            ])
-        )
+        await c.message.edit_text("📌 Từ khoá", reply_markup=smart_buttons(extra=[
+            [InlineKeyboardButton(text="➕ Thêm", callback_data="kw_add")],
+            [InlineKeyboardButton(text="📋 Danh sách", callback_data="kw_list")]
+        ]))
 
     elif d == "kw_add":
         user_state[uid] = "kw_key"
-        temp[uid] = {}
         await c.message.edit_text("👉 Nhập từ khoá")
 
     elif d == "kw_save":
-        data = temp.get(uid)
-
+        data = temp[uid]
         async with SessionLocal() as db:
             db.add(Keyword(**data))
             await db.commit()
-
-        user_state.pop(uid, None)
+        reset(uid)
         await c.message.edit_text("✅ Đã lưu", reply_markup=home_menu())
 
     elif d == "kw_list":
-        kws = await get_keywords()
-        txt = "\n".join([f"- {k.key}" for k in kws]) or "Chưa có"
+        async with SessionLocal() as db:
+            res = await db.execute(select(Keyword))
+            kws = res.scalars().all()
+        txt = "\n".join([k.key for k in kws]) or "Chưa có"
         await c.message.edit_text(txt, reply_markup=home_menu())
 
-    # ===== WELCOME =====
     elif d == "welcome_menu":
         user_state[uid] = "welcome"
         await c.message.edit_text("👉 Nhập nội dung welcome")
 
-    # ===== AUTO POST =====
     elif d == "post_menu":
-        await c.message.edit_text(
-            "📅 Auto Post",
-            reply_markup=smart_buttons(extra=[
-                [InlineKeyboardButton(text="➕ Tạo", callback_data="post_add")]
-            ])
-        )
+        await c.message.edit_text("📅 Auto Post", reply_markup=smart_buttons(extra=[
+            [InlineKeyboardButton(text="➕ Tạo", callback_data="post_add")]
+        ]))
 
     elif d == "post_add":
         user_state[uid] = "post_text"
         await c.message.edit_text("👉 Nhập nội dung post")
 
     elif d == "post_save":
-        data = temp.get(uid)
+        data = temp[uid]
 
-        scheduler.add_job(
-            send_post,
-            "interval",
-            minutes=1,
-            args=[c.message.chat.id, data["text"], data.get("button")]
-        )
+        async with SessionLocal() as db:
+            db.add(AutoPost(**data))
+            await db.commit()
 
-        await c.message.edit_text("✅ Đã tạo auto post", reply_markup=home_menu())
+        scheduler.add_job(send_post, "interval", minutes=data["interval"],
+                          args=[data["chat_id"], data["text"], data["image"], data["button"]])
+
+        reset(uid)
+        await c.message.edit_text("✅ Đã lưu auto post", reply_markup=home_menu())
+
+    elif d.startswith("time_"):
+        temp[uid]["interval"] = int(d.split("_")[1])
+
+        data = temp[uid]
+
+        await send_msg(c.message, data["text"], data.get("image"), data.get("button"))
+
+        await c.message.answer("👁 Preview", reply_markup=smart_buttons(extra=[
+            [InlineKeyboardButton(text="💾 Lưu", callback_data="post_save")]
+        ]))
 
     await c.answer()
 
 # ===== INPUT =====
 @dp.message()
-async def input_handler(m):
+async def handle(m):
     uid = m.from_user.id
-    state = user_state.get(uid)
     text = m.text or ""
+    state = user_state.get(uid)
 
+    # ===== KEYWORD =====
+    async with SessionLocal() as db:
+        res = await db.execute(select(Keyword))
+        kws = res.scalars().all()
+
+    for k in kws:
+        if k.key.lower() in text.lower():
+            await send_msg(m, k.text, k.image, k.button)
+            return
+
+    # ===== STATE =====
     if state == "kw_key":
         temp[uid] = {"key": text}
         user_state[uid] = "kw_text"
-        await m.answer("👉 Nhập nội dung")
+        await send_msg(m, "👉 Nhập nội dung")
 
     elif state == "kw_text":
         temp[uid]["text"] = text
-        user_state[uid] = "kw_button"
-        await m.answer("👉 Nhập button JSON hoặc skip")
-
-    elif state == "kw_button":
-        temp[uid]["button"] = text
         user_state[uid] = None
-
-        await m.answer(
-            "👁 Preview",
-            reply_markup=smart_buttons(extra=[
-                [InlineKeyboardButton(text="💾 Lưu", callback_data="kw_save")]
-            ])
-        )
+        await send_msg(m, "👁 Preview", button=None)
 
     elif state == "welcome":
         async with SessionLocal() as db:
             res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == str(m.chat.id)))
             cfg = res.scalar() or GroupConfig(chat_id=str(m.chat.id))
-
             cfg.welcome_text = text
             db.add(cfg)
             await db.commit()
 
-        user_state.pop(uid, None)
-        await m.answer("✅ Đã lưu welcome", reply_markup=home_menu())
+        reset(uid)
+        await send_msg(m, "✅ Đã lưu welcome")
 
     elif state == "post_text":
-        temp[uid] = {"text": text}
-        user_state[uid] = None
+        temp[uid] = {
+            "chat_id": str(m.chat.id),
+            "text": text,
+            "image": None,
+            "button": None
+        }
 
-        await m.answer(
-            "👁 Preview",
-            reply_markup=smart_buttons(extra=[
-                [InlineKeyboardButton(text="💾 Lưu", callback_data="post_save")]
-            ])
-        )
+        await m.answer("⏱ Chọn thời gian", reply_markup=smart_buttons(extra=[
+            [InlineKeyboardButton(text="10p", callback_data="time_10")],
+            [InlineKeyboardButton(text="30p", callback_data="time_30")],
+            [InlineKeyboardButton(text="60p", callback_data="time_60")]
+        ]))
 
-    else:
-        # ===== KEYWORD MATCH =====
-        kws = await get_keywords()
-        for k in kws:
-            if k.key in text.lower():
-                await m.answer(k.text, reply_markup=smart_buttons(k.button))
-                return
-
-        # ===== AI =====
-        cfg = await get_cfg(m.chat.id)
-        if cfg and getattr(cfg, "auto_ai", 1) == 0:
-            return
-
-        reply = await ai_reply(text)
-        await m.answer(reply, reply_markup=home_menu())
+    # ===== AI (ADMIN ONLY) =====
+    if is_admin(uid):
+        await m.answer("🤖 AI đang hoạt động")
 
 # ===== AUTO POST =====
-async def send_post(chat_id, text, button=None):
-    await bot.send_message(chat_id, text, reply_markup=smart_buttons(button))
+async def send_post(chat_id, text, image=None, button=None):
+    markup = smart_buttons(button)
+
+    if image:
+        await bot.send_photo(chat_id, image, caption=text, reply_markup=markup)
+    else:
+        await bot.send_message(chat_id, text, reply_markup=markup)
 
 # ===== WEB =====
 @app.get("/")
@@ -269,10 +277,15 @@ async def webhook(req: Request):
     await dp.feed_update(bot, types.Update(**data))
     return {"ok": True}
 
+# ===== STARTUP =====
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        await conn.execute(sql_text(
+            "ALTER TABLE group_config ADD COLUMN IF NOT EXISTS auto_ai INTEGER DEFAULT 1"
+        ))
 
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")

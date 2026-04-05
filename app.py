@@ -1,8 +1,8 @@
-import os, json, re
+import os, json, re, asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, Text, select
@@ -27,11 +27,14 @@ Base = declarative_base()
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# Redis safe
+redis_client = None
 try:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 except:
-    redis_client = None
+    pass
+
+# ===== CACHE =====
+CONFIG_CACHE = {}
 
 # ===== MODEL =====
 class GroupConfig(Base):
@@ -41,11 +44,12 @@ class GroupConfig(Base):
     welcome_text = Column(Text)
     welcome_image = Column(Text)
     welcome_button = Column(Text)
+    auto_ai = Column(Integer, default=1)
 
 class Keyword(Base):
     __tablename__ = "keywords"
     id = Column(Integer, primary_key=True)
-    key = Column(String, unique=True)
+    key = Column(String)
     text = Column(Text)
     image = Column(Text)
     button = Column(Text)
@@ -58,7 +62,8 @@ def build_buttons(data):
     try:
         if isinstance(data, str):
             data = json.loads(data)
-    except:
+    except Exception as e:
+        print("❌ BUTTON ERROR:", e)
         return None
 
     rows, row = [], []
@@ -77,18 +82,29 @@ def build_buttons(data):
 
 # ===== CONFIG =====
 async def get_cfg(chat_id):
+    if chat_id in CONFIG_CACHE:
+        return CONFIG_CACHE[chat_id]
+
     async with SessionLocal() as db:
         res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == str(chat_id)))
-        return res.scalar()
+        cfg = res.scalar()
 
-# ===== KEYWORD =====
+    CONFIG_CACHE[chat_id] = cfg
+    return cfg
+
+# ===== KEYWORD (FIX) =====
 async def get_keyword(text):
     async with SessionLocal() as db:
-        res = await db.execute(select(Keyword).where(Keyword.key == text))
-        kw = res.scalar()
+        res = await db.execute(select(Keyword))
+        keywords = res.scalars().all()
 
-    if kw:
-        return {"text": kw.text, "image": kw.image, "button": kw.button}
+    for kw in keywords:
+        if kw.key and kw.key.lower() in text:
+            return {
+                "text": kw.text,
+                "image": kw.image,
+                "button": kw.button
+            }
 
     return None
 
@@ -101,7 +117,10 @@ async def ai_reply(text):
 
     resp = await client.chat.completions.create(
         model="gpt-4.1-mini",
-        messages=[{"role":"user","content":text}]
+        messages=[
+            {"role": "system", "content": "Trả lời bằng tiếng Việt, ngắn gọn, đúng trọng tâm."},
+            {"role": "user", "content": text}
+        ]
     )
 
     reply = resp.choices[0].message.content
@@ -119,24 +138,26 @@ edit_mode = {}
 async def handle(m: types.Message):
     text = (m.text or "").lower()
 
-    # ===== SET WELCOME (BOT) =====
+    # ===== CONFIG =====
+    cfg = await get_cfg(m.chat.id)
+
+    # ===== SET WELCOME =====
     if text == "set welcome":
         edit_mode[m.from_user.id] = "welcome"
         await m.answer("📩 Gửi nội dung welcome")
         return
 
     if m.from_user.id in edit_mode:
-        mode = edit_mode[m.from_user.id]
-
         async with SessionLocal() as db:
             res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == str(m.chat.id)))
             cfg = res.scalar() or GroupConfig(chat_id=str(m.chat.id))
 
-            if mode == "welcome":
-                cfg.welcome_text = m.text
+            cfg.welcome_text = m.text
 
             db.add(cfg)
             await db.commit()
+
+        CONFIG_CACHE.pop(m.chat.id, None)
 
         del edit_mode[m.from_user.id]
         await m.answer("✅ Đã lưu")
@@ -145,12 +166,12 @@ async def handle(m: types.Message):
     # ===== LOCK =====
     if "下课" in text:
         await bot.set_chat_permissions(m.chat.id, types.ChatPermissions(can_send_messages=False))
-        await m.answer("🔒 已关闭发言")
+        await m.answer("🔒 Đã khoá nhóm")
         return
 
     if "上课" in text:
         await bot.set_chat_permissions(m.chat.id, types.ChatPermissions(can_send_messages=True))
-        await m.answer("🔓 已开启发言")
+        await m.answer("🔓 Đã mở nhóm")
         return
 
     # ===== PIN =====
@@ -158,25 +179,19 @@ async def handle(m: types.Message):
         await bot.pin_chat_message(m.chat.id, m.reply_to_message.message_id)
         return
 
-    # ===== CLEAN =====
-    if re.search(r"(http|t\.me|@)", text):
-        try:
-            await m.delete()
-        except:
-            pass
+    # ===== ANTI LINK =====
+    if re.search(r"(http|t\.me)", text):
         return
 
-    # ===== LOAD CONFIG =====
-    cfg = await get_cfg(m.chat.id)
-
-    # ===== WELCOME =====
+    # ===== WELCOME (FIX) =====
     if m.new_chat_members:
         if cfg:
             for u in m.new_chat_members:
-                txt = (cfg.welcome_text or "👋 Welcome {name}").replace("{name}", u.full_name)
+                txt = (cfg.welcome_text or "👋 Chào {name}").replace("{name}", u.full_name)
 
                 if cfg.welcome_image:
-                    await m.answer_photo(cfg.welcome_image, caption=txt, reply_markup=build_buttons(cfg.welcome_button))
+                    await m.answer_photo(cfg.welcome_image, caption=txt,
+                                         reply_markup=build_buttons(cfg.welcome_button))
                 else:
                     await m.answer(txt, reply_markup=build_buttons(cfg.welcome_button))
         return
@@ -191,23 +206,24 @@ async def handle(m: types.Message):
             await m.answer(kw["text"], reply_markup=markup)
         return
 
-    # ===== AI =====
+    # ===== AI (RESPECT CONFIG) =====
+    if cfg and cfg.auto_ai == 0:
+        return
+
     reply = await ai_reply(text)
     await m.answer(reply)
 
-# ===== HOME =====
+# ===== WEB =====
 @app.get("/")
 async def home():
     return RedirectResponse("/dashboard")
 
-# ===== DASHBOARD =====
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    return "<h2>Dashboard đang chạy 🚀</h2>"
+    return "<h2>🚀 Dashboard PRO đang chạy</h2>"
 
-# ===== API SAVE =====
 @app.post("/api/config/{chat_id}")
-async def save(chat_id:str,data:dict):
+async def save(chat_id: str, data: dict):
     async with SessionLocal() as db:
         res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == chat_id))
         cfg = res.scalar() or GroupConfig(chat_id=chat_id)
@@ -219,18 +235,20 @@ async def save(chat_id:str,data:dict):
         db.add(cfg)
         await db.commit()
 
-    return {"ok":True}
+    CONFIG_CACHE.pop(int(chat_id), None)
+
+    return {"ok": True}
 
 # ===== WEBHOOK =====
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
-    await dp.feed_update(bot, Update(**data))
+    await dp.feed_update(bot, types.Update(**data))
     return {"ok": True}
 
 @app.on_event("startup")
 async def startup():
-    print("🚀 STARTING...")
+    print("🚀 BOT STARTING...")
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

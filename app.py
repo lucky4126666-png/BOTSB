@@ -70,7 +70,7 @@ def is_banned(uid):
 # ===== UI =====
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Dashboard", url="/admin")],
+        [InlineKeyboardButton(text="📊 Dashboard", url=f"{BASE_URL}/admin")],
         [InlineKeyboardButton(text="🚀 Post nhanh", callback_data="quick_post")]
     ])
 

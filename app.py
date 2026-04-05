@@ -7,13 +7,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-# ===== LOCK (ANTI DUPLICATE BOT) =====
-LOCK_FILE = "/tmp/bot.lock"
-if os.path.exists(LOCK_FILE):
-    print("⚠️ Bot already running → exit")
-    exit()
-open(LOCK_FILE, "w").close()
-
 # ===== CONFIG =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -95,13 +88,13 @@ async def sender():
         QUEUE.task_done()
 
 # ===== SAFE TASK =====
-async def safe_task(coro, name):
+async def safe_loop(coro, name):
     while True:
         try:
-            print(f"🚀 Start {name}")
+            print(f"🚀 {name} started")
             await coro()
         except Exception as e:
-            print(f"❌ {name} crash:", e)
+            print(f"❌ {name} crashed:", e)
             await asyncio.sleep(3)
 
 # ===== AI =====
@@ -176,7 +169,6 @@ async def handle(m: types.Message):
     if is_banned(uid) or not is_admin(uid): return
 
     text = (m.text or "").strip().lower()
-
     asyncio.create_task(process_message(m, text))
 
 async def process_message(m, text):
@@ -227,10 +219,12 @@ async def stats(request):
 async def on_start(app):
     print("🚀 Starting bot...")
 
+    # FIX CONFLICT TRIỆT ĐỂ
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")
 
-    asyncio.create_task(safe_task(sender, "Sender"))
-    asyncio.create_task(safe_task(scheduler, "Scheduler"))
+    asyncio.create_task(safe_loop(sender, "Sender"))
+    asyncio.create_task(safe_loop(scheduler, "Scheduler"))
 
 # ===== APP =====
 app = web.Application()

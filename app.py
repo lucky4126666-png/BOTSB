@@ -143,3 +143,7 @@ async def delete_keyword(key: str):
         await db.execute(delete(Keyword).where(Keyword.key == key))
         await db.commit()
     return {"ok": True}
+
+@app.get("/")
+async def home():
+    return {"status": "ok", "message": "Bot is running 🚀"}

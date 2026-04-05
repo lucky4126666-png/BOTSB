@@ -230,5 +230,10 @@ async def webhook(req: Request):
 
 @app.on_event("startup")
 async def startup():
+    print("🚀 STARTING...")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")

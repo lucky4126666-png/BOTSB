@@ -1,48 +1,39 @@
 import os, json, re, asyncio
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, Text, select
 from openai import AsyncOpenAI
-import redis.asyncio as redis
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ===== ENV =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-REDIS_URL = os.getenv("REDIS_URL")
 
 # ===== INIT =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_async_engine(DATABASE_URL)
 SessionLocal = sessionmaker(engine, class_=AsyncSession)
 Base = declarative_base()
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+scheduler = AsyncIOScheduler()
+scheduler.start()
 
-redis_client = None
-try:
-    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-except:
-    pass
-
-# ===== CACHE =====
-CONFIG_CACHE = {}
-
-# ===== MODEL =====
+# ===== MODELS =====
 class GroupConfig(Base):
     __tablename__ = "group_config"
     id = Column(Integer, primary_key=True)
     chat_id = Column(String, unique=True)
     welcome_text = Column(Text)
-    welcome_image = Column(Text)
     welcome_button = Column(Text)
     auto_ai = Column(Integer, default=1)
 
@@ -51,193 +42,225 @@ class Keyword(Base):
     id = Column(Integer, primary_key=True)
     key = Column(String)
     text = Column(Text)
-    image = Column(Text)
     button = Column(Text)
 
-# ===== BUTTON =====
-def build_buttons(data):
-    if not data:
-        return None
+# ===== BUTTON SYSTEM =====
+def smart_buttons(data=None, extra=None):
+    rows = []
 
-    try:
-        if isinstance(data, str):
-            data = json.loads(data)
-    except Exception as e:
-        print("❌ BUTTON ERROR:", e)
-        return None
+    if data:
+        try:
+            if isinstance(data, str):
+                data = json.loads(data)
+        except:
+            data = []
 
-    rows, row = [], []
-    for b in data:
-        btn = InlineKeyboardButton(text=b["text"], url=b["url"])
-        row.append(btn)
-
-        if len(row) == 2:
+        row = []
+        for b in data:
+            row.append(InlineKeyboardButton(text=b["text"], url=b["url"]))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
             rows.append(row)
-            row = []
 
-    if row:
-        rows.append(row)
+    if extra:
+        rows.extend(extra)
+
+    rows.append([InlineKeyboardButton(text="🏠 Menu", callback_data="home")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ===== CONFIG =====
-async def get_cfg(chat_id):
-    if chat_id in CONFIG_CACHE:
-        return CONFIG_CACHE[chat_id]
+# ===== MENU =====
+def home_menu():
+    return smart_buttons(extra=[
+        [InlineKeyboardButton(text="📌 Từ khoá", callback_data="kw_menu")],
+        [InlineKeyboardButton(text="👋 Lời chào", callback_data="welcome_menu")],
+        [InlineKeyboardButton(text="📅 Auto Post", callback_data="post_menu")]
+    ])
 
+# ===== DB =====
+async def get_cfg(chat_id):
     async with SessionLocal() as db:
         res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == str(chat_id)))
-        cfg = res.scalar()
+        return res.scalar()
 
-    CONFIG_CACHE[chat_id] = cfg
-    return cfg
-
-# ===== KEYWORD (FIX) =====
-async def get_keyword(text):
+async def get_keywords():
     async with SessionLocal() as db:
         res = await db.execute(select(Keyword))
-        keywords = res.scalars().all()
-
-    for kw in keywords:
-        if kw.key and kw.key.lower() in text:
-            return {
-                "text": kw.text,
-                "image": kw.image,
-                "button": kw.button
-            }
-
-    return None
+        return res.scalars().all()
 
 # ===== AI =====
 async def ai_reply(text):
-    if redis_client:
-        cache = await redis_client.get(text)
-        if cache:
-            return cache
-
     resp = await client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {"role": "system", "content": "Trả lời bằng tiếng Việt, ngắn gọn, đúng trọng tâm."},
+            {"role": "system", "content": "Trả lời tiếng Việt ngắn gọn"},
             {"role": "user", "content": text}
         ]
     )
+    return resp.choices[0].message.content
 
-    reply = resp.choices[0].message.content
+# ===== STATE =====
+user_state = {}
+temp = {}
 
-    if redis_client:
-        await redis_client.setex(text, 86400, reply)
+# ===== START =====
+@dp.message(F.text == "/start")
+async def start(m):
+    await m.answer("🚀 Control Panel", reply_markup=home_menu())
 
-    return reply
+# ===== CALLBACK =====
+@dp.callback_query()
+async def cb(c):
+    d = c.data
+    uid = c.from_user.id
 
-# ===== EDIT MODE =====
-edit_mode = {}
+    # HOME
+    if d == "home":
+        await c.message.edit_text("🏠 Menu", reply_markup=home_menu())
 
-# ===== BOT =====
+    # ===== KEYWORD =====
+    elif d == "kw_menu":
+        await c.message.edit_text(
+            "📌 Từ khoá",
+            reply_markup=smart_buttons(extra=[
+                [InlineKeyboardButton(text="➕ Thêm", callback_data="kw_add")],
+                [InlineKeyboardButton(text="📋 Danh sách", callback_data="kw_list")]
+            ])
+        )
+
+    elif d == "kw_add":
+        user_state[uid] = "kw_key"
+        temp[uid] = {}
+        await c.message.edit_text("👉 Nhập từ khoá")
+
+    elif d == "kw_save":
+        data = temp.get(uid)
+
+        async with SessionLocal() as db:
+            db.add(Keyword(**data))
+            await db.commit()
+
+        user_state.pop(uid, None)
+        await c.message.edit_text("✅ Đã lưu", reply_markup=home_menu())
+
+    elif d == "kw_list":
+        kws = await get_keywords()
+        txt = "\n".join([f"- {k.key}" for k in kws]) or "Chưa có"
+        await c.message.edit_text(txt, reply_markup=home_menu())
+
+    # ===== WELCOME =====
+    elif d == "welcome_menu":
+        user_state[uid] = "welcome"
+        await c.message.edit_text("👉 Nhập nội dung welcome")
+
+    # ===== AUTO POST =====
+    elif d == "post_menu":
+        await c.message.edit_text(
+            "📅 Auto Post",
+            reply_markup=smart_buttons(extra=[
+                [InlineKeyboardButton(text="➕ Tạo", callback_data="post_add")]
+            ])
+        )
+
+    elif d == "post_add":
+        user_state[uid] = "post_text"
+        await c.message.edit_text("👉 Nhập nội dung post")
+
+    elif d == "post_save":
+        data = temp.get(uid)
+
+        scheduler.add_job(
+            send_post,
+            "interval",
+            minutes=1,
+            args=[c.message.chat.id, data["text"], data.get("button")]
+        )
+
+        await c.message.edit_text("✅ Đã tạo auto post", reply_markup=home_menu())
+
+    await c.answer()
+
+# ===== INPUT =====
 @dp.message()
-async def handle(m: types.Message):
-    text = (m.text or "").lower()
+async def input_handler(m):
+    uid = m.from_user.id
+    state = user_state.get(uid)
+    text = m.text or ""
 
-    # ===== CONFIG =====
-    cfg = await get_cfg(m.chat.id)
+    if state == "kw_key":
+        temp[uid] = {"key": text}
+        user_state[uid] = "kw_text"
+        await m.answer("👉 Nhập nội dung")
 
-    # ===== SET WELCOME =====
-    if text == "set welcome":
-        edit_mode[m.from_user.id] = "welcome"
-        await m.answer("📩 Gửi nội dung welcome")
-        return
+    elif state == "kw_text":
+        temp[uid]["text"] = text
+        user_state[uid] = "kw_button"
+        await m.answer("👉 Nhập button JSON hoặc skip")
 
-    if m.from_user.id in edit_mode:
+    elif state == "kw_button":
+        temp[uid]["button"] = text
+        user_state[uid] = None
+
+        await m.answer(
+            "👁 Preview",
+            reply_markup=smart_buttons(extra=[
+                [InlineKeyboardButton(text="💾 Lưu", callback_data="kw_save")]
+            ])
+        )
+
+    elif state == "welcome":
         async with SessionLocal() as db:
             res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == str(m.chat.id)))
             cfg = res.scalar() or GroupConfig(chat_id=str(m.chat.id))
 
-            cfg.welcome_text = m.text
-
+            cfg.welcome_text = text
             db.add(cfg)
             await db.commit()
 
-        CONFIG_CACHE.pop(m.chat.id, None)
+        user_state.pop(uid, None)
+        await m.answer("✅ Đã lưu welcome", reply_markup=home_menu())
 
-        del edit_mode[m.from_user.id]
-        await m.answer("✅ Đã lưu")
-        return
+    elif state == "post_text":
+        temp[uid] = {"text": text}
+        user_state[uid] = None
 
-    # ===== LOCK =====
-    if "下课" in text:
-        await bot.set_chat_permissions(m.chat.id, types.ChatPermissions(can_send_messages=False))
-        await m.answer("🔒 Đã khoá nhóm")
-        return
+        await m.answer(
+            "👁 Preview",
+            reply_markup=smart_buttons(extra=[
+                [InlineKeyboardButton(text="💾 Lưu", callback_data="post_save")]
+            ])
+        )
 
-    if "上课" in text:
-        await bot.set_chat_permissions(m.chat.id, types.ChatPermissions(can_send_messages=True))
-        await m.answer("🔓 Đã mở nhóm")
-        return
+    else:
+        # ===== KEYWORD MATCH =====
+        kws = await get_keywords()
+        for k in kws:
+            if k.key in text.lower():
+                await m.answer(k.text, reply_markup=smart_buttons(k.button))
+                return
 
-    # ===== PIN =====
-    if "ghim mes" in text and m.reply_to_message:
-        await bot.pin_chat_message(m.chat.id, m.reply_to_message.message_id)
-        return
+        # ===== AI =====
+        cfg = await get_cfg(m.chat.id)
+        if cfg and getattr(cfg, "auto_ai", 1) == 0:
+            return
 
-    # ===== ANTI LINK =====
-    if re.search(r"(http|t\.me)", text):
-        return
+        reply = await ai_reply(text)
+        await m.answer(reply, reply_markup=home_menu())
 
-    # ===== WELCOME (FIX) =====
-    if m.new_chat_members:
-        if cfg:
-            for u in m.new_chat_members:
-                txt = (cfg.welcome_text or "👋 Chào {name}").replace("{name}", u.full_name)
-
-                if cfg.welcome_image:
-                    await m.answer_photo(cfg.welcome_image, caption=txt,
-                                         reply_markup=build_buttons(cfg.welcome_button))
-                else:
-                    await m.answer(txt, reply_markup=build_buttons(cfg.welcome_button))
-        return
-
-    # ===== KEYWORD =====
-    kw = await get_keyword(text)
-    if kw:
-        markup = build_buttons(kw["button"])
-        if kw["image"]:
-            await m.answer_photo(kw["image"], caption=kw["text"], reply_markup=markup)
-        else:
-            await m.answer(kw["text"], reply_markup=markup)
-        return
-
-    # ===== AI (RESPECT CONFIG) =====
-    if cfg and cfg.auto_ai == 0:
-        return
-
-    reply = await ai_reply(text)
-    await m.answer(reply)
+# ===== AUTO POST =====
+async def send_post(chat_id, text, button=None):
+    await bot.send_message(chat_id, text, reply_markup=smart_buttons(button))
 
 # ===== WEB =====
 @app.get("/")
 async def home():
     return RedirectResponse("/dashboard")
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
-    return "<h2>🚀 Dashboard PRO đang chạy</h2>"
-
-@app.post("/api/config/{chat_id}")
-async def save(chat_id: str, data: dict):
-    async with SessionLocal() as db:
-        res = await db.execute(select(GroupConfig).where(GroupConfig.chat_id == chat_id))
-        cfg = res.scalar() or GroupConfig(chat_id=chat_id)
-
-        cfg.welcome_text = data.get("text")
-        cfg.welcome_image = data.get("image")
-        cfg.welcome_button = data.get("buttons")
-
-        db.add(cfg)
-        await db.commit()
-
-    CONFIG_CACHE.pop(int(chat_id), None)
-
-    return {"ok": True}
+@app.get("/dashboard")
+async def dash():
+    return {"status": "ok"}
 
 # ===== WEBHOOK =====
 @app.post("/webhook")
@@ -248,10 +271,10 @@ async def webhook(req: Request):
 
 @app.on_event("startup")
 async def startup():
-    print("🚀 BOT STARTING...")
-
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")
+
+    print("🚀 BOT READY")

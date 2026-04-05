@@ -1,12 +1,13 @@
-import os, json, asyncio, uuid
+import os, json, asyncio
 from datetime import datetime, timedelta, timezone
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
+from aiogram.types import Update
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from openai import OpenAI
 
-# ===== LOCK =====
+# ===== LOCK (ANTI DUPLICATE BOT) =====
 LOCK_FILE = "/tmp/bot.lock"
 if os.path.exists(LOCK_FILE):
     print("⚠️ Bot already running → exit")
@@ -15,12 +16,9 @@ open(LOCK_FILE, "w").close()
 
 # ===== CONFIG =====
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
-TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", OWNER_ID))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "123456")
+BASE_URL = os.getenv("BASE_URL")  # https://abc.up.railway.app
+OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -69,12 +67,6 @@ schedules = load_schedule()
 def get_now():
     return datetime.now(timezone.utc) + timedelta(hours=7)
 
-# ===== SESSION =====
-SESSIONS = set()
-
-def check_login(request):
-    return request.cookies.get("session") in SESSIONS
-
 # ===== PERMISSION =====
 def is_admin(uid):
     return uid == OWNER_ID or uid in ADMIN_IDS
@@ -82,49 +74,53 @@ def is_admin(uid):
 def is_banned(uid):
     return uid in BANNED_IDS
 
-# ===== UI MENU =====
+# ===== UI =====
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📊 Dashboard", url="/admin"),
-            InlineKeyboardButton(text="📅 Schedule", callback_data="menu_schedule")
-        ],
-        [
-            InlineKeyboardButton(text="⚙️ Settings", callback_data="menu_settings"),
-            InlineKeyboardButton(text="👑 Admin", callback_data="menu_admin")
-        ],
-        [
-            InlineKeyboardButton(text="🚀 Post nhanh", callback_data="quick_post")
-        ]
+        [InlineKeyboardButton(text="📊 Dashboard", url="/admin")],
+        [InlineKeyboardButton(text="🚀 Post nhanh", callback_data="quick_post")]
     ])
 
-# ===== AI =====
-async def ai_reply(text):
-    try:
-        res = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role":"system","content":"Trả lời ngắn gọn, thông minh, tiếng Việt"},
-                {"role":"user","content":text}
-            ]
-        )
-        return res.choices[0].message.content
-    except Exception as e:
-        print("AI ERROR:", e)
-        return "⚠️ AI lỗi"
-
 # ===== QUEUE =====
-SEND_QUEUE = asyncio.Queue()
+QUEUE = asyncio.Queue(maxsize=1000)
 
 async def sender():
     while True:
-        func, args = await SEND_QUEUE.get()
+        func, args = await QUEUE.get()
         try:
             await func(*args)
-            await asyncio.sleep(0.8)
         except Exception as e:
             print("SEND ERROR:", e)
-        SEND_QUEUE.task_done()
+        await asyncio.sleep(0.3)
+        QUEUE.task_done()
+
+# ===== SAFE TASK =====
+async def safe_task(coro, name):
+    while True:
+        try:
+            print(f"🚀 Start {name}")
+            await coro()
+        except Exception as e:
+            print(f"❌ {name} crash:", e)
+            await asyncio.sleep(3)
+
+# ===== AI =====
+async def ai_reply(text):
+    for _ in range(3):
+        try:
+            res = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role":"system","content":"Trả lời ngắn gọn, thông minh, tiếng Việt"},
+                    {"role":"user","content":text}
+                ],
+                timeout=8
+            )
+            return res.choices[0].message.content
+        except Exception as e:
+            print("AI ERROR:", e)
+            await asyncio.sleep(1)
+    return "⚠️ AI đang bận"
 
 # ===== BUTTON =====
 def build_buttons(text):
@@ -150,13 +146,12 @@ async def scheduler():
         for job in schedules[:]:
             try:
                 if job["time"] == now and job.get("last_run") != now:
-
                     markup = build_buttons(job.get("button"))
 
                     if job.get("image"):
-                        await SEND_QUEUE.put((bot.send_photo,(job["chat_id"], job["image"], job["text"], markup)))
+                        await QUEUE.put((bot.send_photo,(job["chat_id"], job["image"], job["text"], markup)))
                     else:
-                        await SEND_QUEUE.put((bot.send_message,(job["chat_id"], job["text"], markup)))
+                        await QUEUE.put((bot.send_message,(job["chat_id"], job["text"], markup)))
 
                     job["last_run"] = now
 
@@ -169,16 +164,11 @@ async def scheduler():
         save_schedule(schedules)
         await asyncio.sleep(15)
 
-# ===== BOT =====
+# ===== BOT HANDLER =====
 @dp.message(Command("start"))
 async def start(m: types.Message):
     if not is_admin(m.from_user.id): return
     await m.answer("🚀 BOT READY", reply_markup=main_menu())
-
-@dp.callback_query()
-async def callbacks(c: types.CallbackQuery):
-    await c.message.edit_text("📋 MENU", reply_markup=main_menu())
-    await c.answer()
 
 @dp.message()
 async def handle(m: types.Message):
@@ -187,63 +177,69 @@ async def handle(m: types.Message):
 
     text = (m.text or "").strip().lower()
 
-    if text in keywords:
-        d = keywords[text]
-        markup = build_buttons(d.get("button"))
+    asyncio.create_task(process_message(m, text))
 
-        if d.get("image"):
-            await SEND_QUEUE.put((m.answer_photo,(d["image"], d["text"], markup)))
+async def process_message(m, text):
+    try:
+        if text in keywords:
+            d = keywords[text]
+            markup = build_buttons(d.get("button"))
+
+            if d.get("image"):
+                await QUEUE.put((m.answer_photo,(d["image"], d["text"], markup)))
+            else:
+                await QUEUE.put((m.answer,(d["text"], markup)))
         else:
-            await SEND_QUEUE.put((m.answer,(d["text"], markup)))
-    else:
-        reply = await ai_reply(text)
-        await SEND_QUEUE.put((m.answer,(reply, main_menu())))
+            reply = await ai_reply(text)
+            await QUEUE.put((m.answer,(reply, main_menu())))
+    except Exception as e:
+        print("PROCESS ERROR:", e)
 
-# ===== WEB =====
-async def login_page(request):
-    return web.Response(text="LOGIN", content_type="text/html")
+# ===== WEBHOOK =====
+async def webhook(request):
+    try:
+        data = await request.json()
+        update = Update(**data)
+        asyncio.create_task(dp.feed_update(bot, update))
+    except Exception as e:
+        print("WEBHOOK ERROR:", e)
+    return web.Response(text="ok")
 
-async def admin_page(request):
-    html = f"""
+# ===== DASHBOARD =====
+async def admin(request):
+    return web.Response(text=f"""
     <html><body style='background:#0f172a;color:white;font-family:sans-serif'>
-    <h1>🚀 SaaS Dashboard</h1>
-    <p>Admin: {len(ADMIN_IDS)}</p>
+    <h1>🚀 BOT DASHBOARD</h1>
+    <p>Admins: {len(ADMIN_IDS)}</p>
     <p>Banned: {len(BANNED_IDS)}</p>
     <p>Schedule: {len(schedules)}</p>
     </body></html>
-    """
-    return web.Response(text=html, content_type="text/html")
+    """, content_type="text/html")
 
-async def api_stats(request):
+async def stats(request):
     return web.json_response({
         "admins": len(ADMIN_IDS),
         "banned": len(BANNED_IDS),
         "schedules": len(schedules)
     })
 
-app = web.Application()
-app.router.add_get("/", lambda r: web.Response(text="BOT OK"))
-app.router.add_get("/login", login_page)
-app.router.add_get("/admin", admin_page)
-app.router.add_get("/api/stats", api_stats)
-
 # ===== START =====
-async def start_bot(app):
+async def on_start(app):
+    print("🚀 Starting bot...")
 
-    async def run_bot():
-        while True:
-            try:
-                print("🚀 Bot running...")
-                await dp.start_polling(bot)
-            except Exception as e:
-                print("BOT ERROR:", e)
-                await asyncio.sleep(5)
+    await bot.set_webhook(f"{BASE_URL}/webhook")
 
-    asyncio.create_task(run_bot())
-    asyncio.create_task(scheduler())
-    asyncio.create_task(sender())
+    asyncio.create_task(safe_task(sender, "Sender"))
+    asyncio.create_task(safe_task(scheduler, "Scheduler"))
 
-app.on_startup.append(start_bot)
+# ===== APP =====
+app = web.Application()
+app.router.add_post("/webhook", webhook)
+app.router.add_get("/", lambda r: web.Response(text="OK"))
+app.router.add_get("/admin", admin)
+app.router.add_get("/api/stats", stats)
 
-if __name__=="__main__":
-    web.run_app(app,host="0.0.0.0",port=int(os.getenv("PORT",8080)))
+app.on_startup.append(on_start)
+
+if __name__ == "__main__":
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

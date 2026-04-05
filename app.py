@@ -48,6 +48,11 @@ async def startup():
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")
 
+# ===== HOME =====
+@app.get("/")
+async def home():
+    return {"status": "ok", "message": "Bot running 🚀"}
+
 # ===== BUTTON =====
 def build_buttons(text):
     if not text:
@@ -65,27 +70,50 @@ def build_buttons(text):
         rows.append(row)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+# ===== LANGUAGE DETECT =====
+def detect_lang(text: str):
+    if any('\u4e00' <= c <= '\u9fff' for c in text):
+        return "zh"
+    if any(c in "ăâđêôơưáàảãạéèẻẽẹíìỉĩịóòỏõọúùủũụýỳỷỹỵ" for c in text.lower()):
+        return "vi"
+    return "en"
+
 # ===== AI =====
 async def ai_reply(uid, text):
+    lang = detect_lang(text)
+
+    if lang == "zh":
+        system_prompt = "请用自然、简短、友好的中文回答用户问题。"
+        fallback = "🤖 系统忙，请稍后再试"
+    elif lang == "vi":
+        system_prompt = "Hãy trả lời ngắn gọn, tự nhiên bằng tiếng Việt."
+        fallback = "🤖 Bot đang bận, thử lại sau"
+    else:
+        system_prompt = "Reply briefly and naturally in English."
+        fallback = "🤖 Bot is busy, try again later"
+
     async with SessionLocal() as db:
         result = await db.execute(
             select(Memory).where(Memory.user_id == str(uid)).limit(5)
         )
         history = result.scalars().all()
 
-        messages = [{"role": "system", "content": "Trả lời ngắn gọn, tiếng Việt"}]
+        messages = [{"role": "system", "content": system_prompt}]
 
         for h in history:
             messages.append({"role": "user", "content": h.content})
 
         messages.append({"role": "user", "content": text})
 
-        res = await client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages
-        )
-
-        reply = res.choices[0].message.content
+        try:
+            res = await client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=messages
+            )
+            reply = res.choices[0].message.content
+        except Exception as e:
+            print("AI ERROR:", e)
+            reply = fallback
 
         db.add(Memory(user_id=str(uid), content=text))
         await db.commit()
@@ -143,7 +171,3 @@ async def delete_keyword(key: str):
         await db.execute(delete(Keyword).where(Keyword.key == key))
         await db.commit()
     return {"ok": True}
-
-@app.get("/")
-async def home():
-    return {"status": "ok", "message": "Bot is running 🚀"}

@@ -3,6 +3,5 @@ uvicorn
 aiogram
 sqlalchemy
 asyncpg
-openai
 apscheduler
 python-dotenv

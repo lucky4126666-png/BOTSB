@@ -1145,9 +1145,3 @@ async def shutdown():
     with contextlib.suppress(Exception):
         await bot.delete_webhook()
     await bot.session.close()
-
-
-
-
-
-

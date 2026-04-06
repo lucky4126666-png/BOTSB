@@ -8,6 +8,7 @@ import traceback
 from html import escape
 from datetime import datetime
 from typing import Optional, Union
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -30,23 +31,47 @@ from sqlalchemy import Column, Integer, String, Text, select, delete, text
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+import redis.asyncio as redis
 
 load_dotenv()
+
+# ======================
+# ENV
+# ======================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL", "")
 
 if not BOT_TOKEN or not BASE_URL or not DATABASE_URL:
     raise RuntimeError("缺少 BOT_TOKEN / BASE_URL / DATABASE_URL")
 
 BASE_URL = BASE_URL.rstrip("/")
 
-# Chuẩn hóa URL DB cho SQLAlchemy async
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+def normalize_database_url(url: str):
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgresql://") and "+asyncpg" not in url:
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query))
+
+    connect_args = {
+        "timeout": 60,
+    }
+
+    sslmode = query.pop("sslmode", None)
+    if sslmode == "require":
+        connect_args["ssl"] = "require"
+
+    parsed = parsed._replace(query=urlencode(query))
+    return urlunparse(parsed), connect_args
+
+
+DATABASE_URL, DB_CONNECT_ARGS = normalize_database_url(DATABASE_URL)
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 ADMIN_IDS = {
@@ -64,6 +89,7 @@ WELCOME_DEFAULT_BUTTONS = os.getenv(
     "WELCOME_DEFAULT_BUTTONS",
     "新币供需 - https://t.me/gqdh && 新币公群 - https://t.me/gqdh"
 )
+
 WELCOME_RANDOM_NAMES = [
     x.strip() for x in os.getenv(
         "WELCOME_RANDOM_NAMES",
@@ -81,6 +107,10 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
+# ======================
+# APP / BOT
+# ======================
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
@@ -88,65 +118,28 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-
-@pass_context
-def _jinja_url_for(context, name: str, **path_params):
-    request: Request = context["request"]
-
-    if "filename" in path_params and "path" not in path_params:
-        path_params["path"] = path_params.pop("filename")
-
-    url = request.url_for(name, **path_params)
-
-    admin_key = context.get("admin_key", "")
-    if admin_key and name not in ("static", "login", "login_post"):
-        try:
-            url = url.include_query_params(key=admin_key)
-        except Exception:
-            pass
-
-    return url
-
-
-templates.env.globals["url_for"] = _jinja_url_for
-templates.env.globals["get_flashed_messages"] = lambda *args, **kwargs: []
-
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
     pool_recycle=300,
-    connect_args={"timeout": 20},
+    pool_timeout=60,
+    connect_args=DB_CONNECT_ARGS,
 )
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-
-async def wait_for_db(max_retries: int = 8, delay: int = 3):
-    last_error = None
-    for i in range(max_retries):
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
-            print("[DB] connected")
-            return
-        except Exception as e:
-            last_error = e
-            print(f"[DB] connect failed ({i + 1}/{max_retries}): {e}")
-            await asyncio.sleep(delay)
-    raise last_error
-
+redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
 worker_task = None
 
+# RAM fallback nếu Redis không có
 user_state = {}
 temp = {}
 selected_group = {}
 selected_lang = {}
 private_menu_msg = {}
 admin_cache = set()
-
-# cache để giảm lag
 keyword_cache = []
 banned_cache = []
 
@@ -223,6 +216,137 @@ AI_AGENT_SYSTEM_PROMPT = """
 }
 """
 
+# ======================
+# JINJA
+# ======================
+
+@pass_context
+def _jinja_url_for(context, name: str, **path_params):
+    request: Request = context["request"]
+
+    if "filename" in path_params and "path" not in path_params:
+        path_params["path"] = path_params.pop("filename")
+
+    url = request.url_for(name, **path_params)
+
+    admin_key = context.get("admin_key", "")
+    if admin_key and name not in ("static", "login", "login_post"):
+        try:
+            url = url.include_query_params(key=admin_key)
+        except Exception:
+            pass
+
+    return url
+
+
+templates.env.globals["url_for"] = _jinja_url_for
+templates.env.globals["get_flashed_messages"] = lambda *args, **kwargs: []
+
+# ======================
+# REDIS HELPERS
+# ======================
+
+async def redis_set_json(key: str, value, ex: Optional[int] = None):
+    if not redis_client:
+        return
+    await redis_client.set(key, json.dumps(value, ensure_ascii=False), ex=ex)
+
+
+async def redis_get_json(key: str, default=None):
+    if not redis_client:
+        return default
+    raw = await redis_client.get(key)
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+async def redis_del(key: str):
+    if not redis_client:
+        return
+    await redis_client.delete(key)
+
+
+# ======================
+# STATE HELPERS
+# ======================
+
+async def get_state(uid: int):
+    if redis_client:
+        return await redis_get_json(f"state:{uid}", None)
+    return user_state.get(uid)
+
+
+async def set_state(uid: int, value: Optional[str]):
+    if redis_client:
+        if value is None:
+            await redis_del(f"state:{uid}")
+        else:
+            await redis_set_json(f"state:{uid}", value, ex=3600)
+    if value is None:
+        user_state.pop(uid, None)
+    else:
+        user_state[uid] = value
+
+
+async def get_temp(uid: int):
+    if redis_client:
+        return await redis_get_json(f"temp:{uid}", {})
+    return temp.get(uid, {})
+
+
+async def set_temp(uid: int, value: dict):
+    if redis_client:
+        await redis_set_json(f"temp:{uid}", value, ex=3600)
+    temp[uid] = value
+
+
+async def get_selected_group(uid: int):
+    if redis_client:
+        return await redis_get_json(f"sel_group:{uid}", None)
+    return selected_group.get(uid)
+
+
+async def set_selected_group(uid: int, value: Optional[str]):
+    if redis_client:
+        if value is None:
+            await redis_del(f"sel_group:{uid}")
+        else:
+            await redis_set_json(f"sel_group:{uid}", value, ex=86400)
+    if value is None:
+        selected_group.pop(uid, None)
+    else:
+        selected_group[uid] = value
+
+
+async def get_selected_lang(uid: int):
+    if redis_client:
+        v = await redis_get_json(f"sel_lang:{uid}", None)
+        if v:
+            return v
+    return selected_lang.get(uid, "zh")
+
+
+async def set_selected_lang(uid: int, value: str):
+    if redis_client:
+        await redis_set_json(f"sel_lang:{uid}", value, ex=86400 * 30)
+    selected_lang[uid] = value
+
+
+async def reset(uid):
+    user_state.pop(uid, None)
+    temp.pop(uid, None)
+    if redis_client:
+        await redis_del(f"state:{uid}")
+        await redis_del(f"temp:{uid}")
+
+
+# ======================
+# BASIC HELPERS
+# ======================
 
 def allowed_admin_ids():
     ids = set(admin_cache) | set(ADMIN_IDS)
@@ -232,12 +356,12 @@ def allowed_admin_ids():
     return ids
 
 
-def get_lang(uid: int) -> str:
-    return selected_lang.get(uid, "zh")
+async def get_lang(uid: int) -> str:
+    return await get_selected_lang(uid)
 
 
-def t(uid: int, key: str) -> str:
-    lang = get_lang(uid)
+async def t(uid: int, key: str) -> str:
+    lang = await get_lang(uid)
     return LANG_TEXT.get(lang, LANG_TEXT["zh"]).get(key, key)
 
 
@@ -275,11 +399,6 @@ def web_base_context(request: Request, active_page: str = "", admin_key: str = "
         "admin_key": admin_key,
         **kwargs
     }
-
-
-def reset(uid):
-    user_state.pop(uid, None)
-    temp.pop(uid, None)
 
 
 def stranger_start_kb():
@@ -320,12 +439,12 @@ async def allowed_or_ignore(c: types.CallbackQuery):
 # BUTTON / TEXT HELPERS
 # ======================
 
-def parse_buttons(text):
-    if not text:
+def parse_buttons(text_):
+    if not text_:
         return None
 
     rows = []
-    for line in text.split("\n"):
+    for line in text_.split("\n"):
         row = []
         for part in line.split("&&"):
             part = part.strip()
@@ -366,20 +485,20 @@ async def safe_edit(message, text_: str, reply_markup=None):
         return await message.answer(text_, reply_markup=reply_markup)
 
 
-async def send_preview(chat_id, text=None, image=None, button=None, parse_mode=None):
+async def send_preview(chat_id, text_=None, image=None, button=None, parse_mode=None):
     kb = build_buttons(parse_buttons(button))
     try:
         if image:
             return await bot.send_photo(
                 chat_id=chat_id,
                 photo=image,
-                caption=text or "",
+                caption=text_ or "",
                 reply_markup=kb,
                 parse_mode=parse_mode
             )
         return await bot.send_message(
             chat_id=chat_id,
-            text=text or " ",
+            text=text_ or " ",
             reply_markup=kb,
             parse_mode=parse_mode
         )
@@ -407,11 +526,11 @@ def parse_dt(s: str):
         return None
 
 
-def extract_first_int(text: str):
-    if not text:
+def extract_first_int(text_: str):
+    if not text_:
         return None
     buf = ""
-    for ch in text:
+    for ch in text_:
         if ch.isdigit():
             buf += ch
         elif buf:
@@ -473,13 +592,13 @@ async def unlock_group(chat_id: Union[int, str]):
     )
 
 
-def normalize_form_text(text: str) -> str:
-    return (text or "").replace("：", ":").strip()
+def normalize_form_text(text_: str) -> str:
+    return (text_ or "").replace("：", ":").strip()
 
 
-def parse_guarantee_form(text: str) -> dict:
+def parse_guarantee_form(text_: str) -> dict:
     data = {}
-    for raw in normalize_form_text(text).splitlines():
+    for raw in normalize_form_text(text_).splitlines():
         line = raw.strip()
         if not line:
             continue
@@ -515,7 +634,7 @@ def build_welcome_text(template: str, user: types.User, chat_title: str = "", ch
     chat_title = escape(chat_title or "")
     chat_id = escape(str(chat_id or ""))
 
-    text = template or ""
+    text_ = template or ""
 
     replacements = {
         "{first_name}": first_name,
@@ -536,13 +655,13 @@ def build_welcome_text(template: str, user: types.User, chat_title: str = "", ch
     }
 
     for old, new in replacements.items():
-        text = text.replace(old, new)
+        text_ = text_.replace(old, new)
 
-    return text
+    return text_
 
 
-def parse_local_ai_agent_request(text: str):
-    raw = (text or "").strip()
+def parse_local_ai_agent_request(text_: str):
+    raw = (text_ or "").strip()
     lower = raw.lower()
 
     if any(x in lower for x in [
@@ -903,59 +1022,8 @@ def ban_menu_kb():
 
 
 # ======================
-# DB / CACHE HELPERS
+# DB / VIEW HELPERS
 # ======================
-
-async def load_admin_cache():
-    global admin_cache
-    async with SessionLocal() as db:
-        rows = (await db.execute(select(AdminUser))).scalars().all()
-    admin_cache = {r.user_id for r in rows}
-
-
-async def reload_keyword_cache():
-    global keyword_cache
-    async with SessionLocal() as db:
-        rows = (await db.execute(
-            select(Keyword).where(Keyword.active == 1).order_by(Keyword.id.desc())
-        )).scalars().all()
-    keyword_cache = rows
-
-
-async def reload_banned_cache():
-    global banned_cache
-    async with SessionLocal() as db:
-        rows = (await db.execute(
-            select(BannedWord).order_by(BannedWord.id.asc())
-        )).scalars().all()
-    banned_cache = rows
-
-
-async def get_admin_groups():
-    async with SessionLocal() as db:
-        groups = (await db.execute(
-            select(BotGroup).where(BotGroup.is_admin == 1).order_by(BotGroup.id.desc())
-        )).scalars().all()
-    return groups
-
-
-async def get_all_groups():
-    async with SessionLocal() as db:
-        groups = (await db.execute(
-            select(BotGroup).order_by(BotGroup.id.desc())
-        )).scalars().all()
-    return groups
-
-
-async def fetch_web_data():
-    async with SessionLocal() as db:
-        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
-        groups = (await db.execute(select(BotGroup).order_by(BotGroup.id.desc()))).scalars().all()
-        keywords = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
-        welcomes = (await db.execute(select(WelcomeSetting).order_by(WelcomeSetting.id.desc()))).scalars().all()
-        autos = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
-    return admins, groups, keywords, welcomes, autos
-
 
 async def show_admin_user_list(message):
     async with SessionLocal() as db:
@@ -1169,7 +1237,7 @@ async def show_banned_list(message):
 
 
 async def execute_ai_action(m: types.Message, uid: int, action: str, params: dict):
-    chat_id = selected_group.get(uid)
+    chat_id = await get_selected_group(uid)
 
     if action == "help":
         help_text = (
@@ -1385,7 +1453,7 @@ async def start(m: types.Message):
         )
         return
 
-    reset(uid)
+    await reset(uid)
 
     if m.chat.type == "private":
         old_msg_id = private_menu_msg.get(uid)
@@ -1396,7 +1464,7 @@ async def start(m: types.Message):
                 await bot.edit_message_text(
                     chat_id=m.chat.id,
                     message_id=old_msg_id,
-                    text=t(uid, "home"),
+                    text=await t(uid, "home"),
                     reply_markup=start_menu_kb(uid)
                 )
                 edited = True
@@ -1406,7 +1474,7 @@ async def start(m: types.Message):
         if edited:
             return
 
-        msg = await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
+        msg = await m.answer(await t(uid, "home"), reply_markup=start_menu_kb(uid))
         private_menu_msg[uid] = msg.message_id
         return
 
@@ -1416,7 +1484,7 @@ async def start(m: types.Message):
         return
 
     if is_allowed_user(uid):
-        await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
+        await m.answer(await t(uid, "home"), reply_markup=start_menu_kb(uid))
 
 
 @dp.message(Command("ping"))
@@ -1429,7 +1497,7 @@ async def ping_cmd(m: types.Message):
 async def cancel(m: types.Message):
     if not m.from_user:
         return
-    reset(m.from_user.id)
+    await reset(m.from_user.id)
     if is_allowed_user(m.from_user.id):
         await m.answer("已取消操作。", reply_markup=start_menu_kb(m.from_user.id))
 
@@ -1439,10 +1507,10 @@ async def ai_cmd(m: types.Message):
     if not m.from_user or not is_allowed_user(m.from_user.id):
         return
     uid = m.from_user.id
-    reset(uid)
-    user_state[uid] = "ai_prompt"
-    temp[uid] = {}
-    await m.answer(t(uid, "ai_prompt"))
+    await reset(uid)
+    await set_state(uid, "ai_prompt")
+    await set_temp(uid, {})
+    await m.answer(await t(uid, "ai_prompt"))
 
 
 @dp.message(Command("addadmin"))
@@ -1503,8 +1571,8 @@ async def list_admins_cmd(m: types.Message):
 async def back_start(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    reset(c.from_user.id)
-    await safe_edit(c.message, t(c.from_user.id, "home"), reply_markup=start_menu_kb(c.from_user.id))
+    await reset(c.from_user.id)
+    await safe_edit(c.message, await t(c.from_user.id, "home"), reply_markup=start_menu_kb(c.from_user.id))
 
 
 # ======================
@@ -1535,9 +1603,9 @@ async def admin_user_add(c: types.CallbackQuery):
         return await c.message.answer("❌ 只有 OWNER 可以添加管理员。")
 
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "admin_add_id"
-    temp[uid] = {}
+    await reset(uid)
+    await set_state(uid, "admin_add_id")
+    await set_temp(uid, {})
     await c.message.answer("请输入要添加的管理员 user_id：")
 
 
@@ -1585,7 +1653,7 @@ async def group_menu(c: types.CallbackQuery):
 async def lang_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    await safe_edit(c.message, t(c.from_user.id, "lang_title"), reply_markup=lang_menu_kb())
+    await safe_edit(c.message, await t(c.from_user.id, "lang_title"), reply_markup=lang_menu_kb())
 
 
 @dp.callback_query(F.data == "ai_menu")
@@ -1593,10 +1661,10 @@ async def ai_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "ai_prompt"
-    temp[uid] = {}
-    await c.message.answer(t(uid, "ai_prompt"))
+    await reset(uid)
+    await set_state(uid, "ai_prompt")
+    await set_temp(uid, {})
+    await c.message.answer(await t(uid, "ai_prompt"))
 
 
 @dp.callback_query(F.data == "ai_agent_menu")
@@ -1607,9 +1675,9 @@ async def ai_agent_menu(c: types.CallbackQuery):
         return await c.message.answer("AI 管家未开启。")
 
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "ai_agent"
-    temp[uid] = {}
+    await reset(uid)
+    await set_state(uid, "ai_agent")
+    await set_temp(uid, {})
 
     await c.message.answer(
         "🧠 AI管家已开启。\n"
@@ -1666,7 +1734,7 @@ async def pick_group(c: types.CallbackQuery):
     chat_id = c.data.replace("pick_group_", "")
     uid = c.from_user.id
 
-    selected_group[uid] = chat_id
+    await set_selected_group(uid, chat_id)
 
     async with SessionLocal() as db:
         g = (await db.execute(
@@ -1677,7 +1745,7 @@ async def pick_group(c: types.CallbackQuery):
 
     await safe_edit(
         c.message,
-        f"✅ 已选择群组：\n{title}\n\n{t(uid, 'home')}",
+        f"✅ 已选择群组：\n{title}\n\n{await t(uid, 'home')}",
         reply_markup=start_menu_kb(uid)
     )
 
@@ -1687,13 +1755,13 @@ async def group_rename(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    chat_id = selected_group.get(uid)
+    chat_id = await get_selected_group(uid)
     if not chat_id:
         return await c.message.answer("请先选择群组。")
 
-    reset(uid)
-    user_state[uid] = "group_rename"
-    temp[uid] = {"chat_id": chat_id}
+    await reset(uid)
+    await set_state(uid, "group_rename")
+    await set_temp(uid, {"chat_id": chat_id})
     await c.message.answer("请输入新的群名：")
 
 
@@ -1702,7 +1770,7 @@ async def group_lock_cb(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    chat_id = selected_group.get(uid)
+    chat_id = await get_selected_group(uid)
     if not chat_id:
         return await c.message.answer("请先选择群组。")
     try:
@@ -1717,7 +1785,7 @@ async def group_unlock_cb(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    chat_id = selected_group.get(uid)
+    chat_id = await get_selected_group(uid)
     if not chat_id:
         return await c.message.answer("请先选择群组。")
     try:
@@ -1731,16 +1799,16 @@ async def group_unlock_cb(c: types.CallbackQuery):
 async def lang_vi(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    selected_lang[c.from_user.id] = "vi"
-    await safe_edit(c.message, t(c.from_user.id, "lang_vi_ok"), reply_markup=start_menu_kb(c.from_user.id))
+    await set_selected_lang(c.from_user.id, "vi")
+    await safe_edit(c.message, await t(c.from_user.id, "lang_vi_ok"), reply_markup=start_menu_kb(c.from_user.id))
 
 
 @dp.callback_query(F.data == "lang_zh")
 async def lang_zh(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    selected_lang[c.from_user.id] = "zh"
-    await safe_edit(c.message, t(c.from_user.id, "lang_zh_ok"), reply_markup=start_menu_kb(c.from_user.id))
+    await set_selected_lang(c.from_user.id, "zh")
+    await safe_edit(c.message, await t(c.from_user.id, "lang_zh_ok"), reply_markup=start_menu_kb(c.from_user.id))
 
 
 # ======================
@@ -1759,9 +1827,9 @@ async def kw_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "kw_add_key"
-    temp[uid] = {}
+    await reset(uid)
+    await set_state(uid, "kw_add_key")
+    await set_temp(uid, {})
     await c.message.answer(
         "请输入关键词。\n"
         "如果要一次添加多个关键词，请每行一个。"
@@ -1818,9 +1886,9 @@ async def kw_key(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "kw_edit_key"
-    temp[uid] = {"id": kid}
+    await reset(uid)
+    await set_state(uid, "kw_edit_key")
+    await set_temp(uid, {"id": kid})
     await c.message.answer("请输入新的关键词：")
 
 
@@ -1830,9 +1898,9 @@ async def kw_text(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "kw_edit_text"
-    temp[uid] = {"id": kid}
+    await reset(uid)
+    await set_state(uid, "kw_edit_text")
+    await set_temp(uid, {"id": kid})
     await c.message.answer("请输入回复文本：")
 
 
@@ -1842,9 +1910,9 @@ async def kw_img(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "kw_edit_image"
-    temp[uid] = {"id": kid}
+    await reset(uid)
+    await set_state(uid, "kw_edit_image")
+    await set_temp(uid, {"id": kid})
     await c.message.answer("请发送图片，或输入图片 URL / file_id：")
 
 
@@ -1854,9 +1922,9 @@ async def kw_btn(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "kw_edit_button"
-    temp[uid] = {"id": kid}
+    await reset(uid)
+    await set_state(uid, "kw_edit_button")
+    await set_temp(uid, {"id": kid})
     await c.message.answer(
         "按钮格式：\n"
         "Google - https://google.com && YouTube - https://youtube.com\n"
@@ -1873,7 +1941,7 @@ async def kw_pre(c: types.CallbackQuery):
         k = await db.get(Keyword, kid)
     if not k:
         return await c.message.answer("关键词不存在。")
-    await send_preview(chat_id=c.from_user.id, text=k.text, image=k.image, button=k.button)
+    await send_preview(chat_id=c.from_user.id, text_=k.text, image=k.image, button=k.button)
 
 
 @dp.callback_query(F.data.startswith("kw_del_"))
@@ -1905,9 +1973,9 @@ async def wl_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "wl_add_chat"
-    temp[uid] = {}
+    await reset(uid)
+    await set_state(uid, "wl_add_chat")
+    await set_temp(uid, {})
     await c.message.answer("请输入群组 chat_id：")
 
 
@@ -1945,9 +2013,9 @@ async def wl_text(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "wl_edit_text"
-    temp[uid] = {"id": wid}
+    await reset(uid)
+    await set_state(uid, "wl_edit_text")
+    await set_temp(uid, {"id": wid})
     await c.message.answer(
         "请输入欢迎文本：\n\n"
         "支持变量：\n"
@@ -1971,9 +2039,9 @@ async def wl_img(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "wl_edit_image"
-    temp[uid] = {"id": wid}
+    await reset(uid)
+    await set_state(uid, "wl_edit_image")
+    await set_temp(uid, {"id": wid})
     await c.message.answer("请发送图片，或输入图片 URL / file_id：")
 
 
@@ -1983,9 +2051,9 @@ async def wl_btn(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "wl_edit_button"
-    temp[uid] = {"id": wid}
+    await reset(uid)
+    await set_state(uid, "wl_edit_button")
+    await set_temp(uid, {"id": wid})
     await c.message.answer(
         "按钮格式：\n"
         "新币供需 - https://t.me/gqdh && 新币公群 - https://t.me/gqdh\n"
@@ -2000,9 +2068,9 @@ async def wl_delmin(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "wl_edit_delete_after"
-    temp[uid] = {"id": wid}
+    await reset(uid)
+    await set_state(uid, "wl_edit_delete_after")
+    await set_temp(uid, {"id": wid})
     await c.message.answer("请输入删除消息的分钟数（0 = 不删除）：")
 
 
@@ -2023,7 +2091,7 @@ async def wl_pre(c: types.CallbackQuery):
     )
     await send_preview(
         chat_id=c.from_user.id,
-        text=preview_text,
+        text_=preview_text,
         image=w.image,
         button=(w.button or "").strip() or default_welcome_button_text(),
         parse_mode="HTML"
@@ -2072,9 +2140,9 @@ async def auto_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_add_chat"
-    temp[uid] = {}
+    await reset(uid)
+    await set_state(uid, "auto_add_chat")
+    await set_temp(uid, {})
     await c.message.answer("请输入要创建定时发送的 chat_id：")
 
 
@@ -2126,9 +2194,9 @@ async def auto_text(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_text"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_text")
+    await set_temp(uid, {"id": pid})
     await c.message.answer("请输入文本内容：")
 
 
@@ -2138,9 +2206,9 @@ async def auto_img(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_image"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_image")
+    await set_temp(uid, {"id": pid})
     await c.message.answer("请发送图片，或输入图片 URL / file_id：")
 
 
@@ -2150,9 +2218,9 @@ async def auto_btn(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_button"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_button")
+    await set_temp(uid, {"id": pid})
     await c.message.answer(
         "按钮格式：\n"
         "Google - https://google.com && YouTube - https://youtube.com\n"
@@ -2166,9 +2234,9 @@ async def auto_chat(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_chat"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_chat")
+    await set_temp(uid, {"id": pid})
     await c.message.answer("请输入新的 chat_id：")
 
 
@@ -2178,9 +2246,9 @@ async def auto_int(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_interval"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_interval")
+    await set_temp(uid, {"id": pid})
     await c.message.answer("请输入重复间隔（分钟）：")
 
 
@@ -2190,9 +2258,9 @@ async def auto_start(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_start"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_start")
+    await set_temp(uid, {"id": pid})
     await c.message.answer("请输入开始时间：YYYY-MM-DD HH:MM")
 
 
@@ -2202,9 +2270,9 @@ async def auto_end(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "auto_edit_end"
-    temp[uid] = {"id": pid}
+    await reset(uid)
+    await set_state(uid, "auto_edit_end")
+    await set_temp(uid, {"id": pid})
     await c.message.answer("请输入结束时间：YYYY-MM-DD HH:MM")
 
 
@@ -2217,7 +2285,7 @@ async def auto_pre(c: types.CallbackQuery):
         p = await db.get(AutoPost, pid)
     if not p:
         return await c.message.answer("不存在。")
-    await send_preview(chat_id=c.from_user.id, text=p.text, image=p.image, button=p.button)
+    await send_preview(chat_id=c.from_user.id, text_=p.text, image=p.image, button=p.button)
 
 
 @dp.callback_query(F.data.startswith("auto_del_"))
@@ -2248,9 +2316,9 @@ async def ban_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
-    reset(uid)
-    user_state[uid] = "ban_add"
-    temp[uid] = {}
+    await reset(uid)
+    await set_state(uid, "ban_add")
+    await set_temp(uid, {})
     await c.message.answer("请输入禁词，每行一个：")
 
 
@@ -2571,7 +2639,7 @@ async def all_messages(m: types.Message):
         return
 
     uid = m.from_user.id
-    state = user_state.get(uid)
+    state = await get_state(uid)
     text_ = (m.text or m.caption or "").strip()
     is_admin_user = is_allowed_user(uid)
 
@@ -2586,11 +2654,11 @@ async def all_messages(m: types.Message):
         return
 
     if text_ == "/start":
-        reset(uid)
+        await reset(uid)
         return await start(m)
 
     if text_ == "/cancel":
-        reset(uid)
+        await reset(uid)
         if is_admin_user:
             return await m.answer("已取消操作。", reply_markup=start_menu_kb(uid))
         return
@@ -2601,19 +2669,19 @@ async def all_messages(m: types.Message):
     # ---- AI ----
     if is_admin_user and state == "ai_prompt":
         if not openai_client:
-            reset(uid)
-            return await m.answer(t(uid, "ai_missing"), reply_markup=start_menu_kb(uid))
+            await reset(uid)
+            return await m.answer(await t(uid, "ai_missing"), reply_markup=start_menu_kb(uid))
 
         prompt = (m.text or m.caption or "").strip()
         if not prompt:
             return await m.answer("请输入文本。")
 
         try:
-            await m.answer(t(uid, "ai_wait"))
+            await m.answer(await t(uid, "ai_wait"))
 
             sys_prompt = (
                 "请用中文简洁回答。"
-                if get_lang(uid) == "zh"
+                if await get_lang(uid) == "zh"
                 else "Hãy trả lời bằng tiếng Việt ngắn gọn, rõ ràng."
             )
 
@@ -2627,12 +2695,12 @@ async def all_messages(m: types.Message):
             )
 
             answer = resp.choices[0].message.content or " "
-            reset(uid)
+            await reset(uid)
             return await m.answer(answer, reply_markup=start_menu_kb(uid))
         except Exception as e:
             print("[OPENAI ERROR]", e)
-            reset(uid)
-            return await m.answer(t(uid, "ai_error"), reply_markup=start_menu_kb(uid))
+            await reset(uid)
+            return await m.answer(await t(uid, "ai_error"), reply_markup=start_menu_kb(uid))
 
     # ---- AI AGENT ----
     if is_admin_user and state == "ai_agent":
@@ -2645,11 +2713,11 @@ async def all_messages(m: types.Message):
         params = result.get("params", {}) or {}
 
         if result.get("need_more"):
-            temp[uid] = {
+            await set_temp(uid, {
                 "pending_ai_action": action,
                 "pending_ai_params": params
-            }
-            user_state[uid] = "ai_agent_wait_more"
+            })
+            await set_state(uid, "ai_agent_wait_more")
             return await m.answer(result.get("question") or "请补充更多信息。")
 
         if action == "help":
@@ -2657,11 +2725,11 @@ async def all_messages(m: types.Message):
             return await m.answer(reply)
 
         if AI_AGENT_CONFIRM_REQUIRED and result.get("need_confirm"):
-            temp[uid] = {
+            await set_temp(uid, {
                 "pending_ai_action": action,
                 "pending_ai_params": params
-            }
-            user_state[uid] = "ai_agent_confirm"
+            })
+            await set_state(uid, "ai_agent_confirm")
             return await m.answer(
                 f"⚠️ 即将执行操作：{action}\n"
                 f"参数：{params}\n\n"
@@ -2675,8 +2743,9 @@ async def all_messages(m: types.Message):
         if not answer_text:
             return await m.answer("请继续输入。")
 
-        action = temp.get(uid, {}).get("pending_ai_action")
-        params = temp.get(uid, {}).get("pending_ai_params", {}) or {}
+        tmp = await get_temp(uid)
+        action = tmp.get("pending_ai_action")
+        params = tmp.get("pending_ai_params", {}) or {}
 
         if action == "rename_group":
             params["title"] = answer_text
@@ -2690,19 +2759,19 @@ async def all_messages(m: types.Message):
             params["text"] = answer_text
 
         if AI_AGENT_CONFIRM_REQUIRED and action in ("rename_group", "lock_group", "unlock_group"):
-            temp[uid] = {
+            await set_temp(uid, {
                 "pending_ai_action": action,
                 "pending_ai_params": params
-            }
-            user_state[uid] = "ai_agent_confirm"
+            })
+            await set_state(uid, "ai_agent_confirm")
             return await m.answer(
                 f"⚠️ 即将执行操作：{action}\n"
                 f"参数：{params}\n\n"
                 f"请输入 确认 执行，或 /cancel 取消。"
             )
 
-        user_state[uid] = "ai_agent"
-        temp[uid] = {}
+        await set_state(uid, "ai_agent")
+        await set_temp(uid, {})
         return await execute_ai_action(m, uid, action, params)
 
     if is_admin_user and state == "ai_agent_confirm":
@@ -2710,17 +2779,18 @@ async def all_messages(m: types.Message):
         if text_in not in ("确认", "confirm", "yes", "ok"):
             return await m.answer("未确认执行。请输入 确认，或 /cancel 取消。")
 
-        action = temp.get(uid, {}).get("pending_ai_action")
-        params = temp.get(uid, {}).get("pending_ai_params", {}) or {}
+        tmp = await get_temp(uid)
+        action = tmp.get("pending_ai_action")
+        params = tmp.get("pending_ai_params", {}) or {}
 
-        user_state[uid] = "ai_agent"
-        temp[uid] = {}
+        await set_state(uid, "ai_agent")
+        await set_temp(uid, {})
         return await execute_ai_action(m, uid, action, params)
 
     # ---- ADMIN ADD ID ----
     if is_admin_user and state == "admin_add_id":
         if uid != OWNER_ID:
-            reset(uid)
+            await reset(uid)
             return await m.answer("❌ 只有 OWNER 可以添加管理员。")
 
         raw = (m.text or "").strip()
@@ -2738,7 +2808,7 @@ async def all_messages(m: types.Message):
             )).scalars().first()
 
             if exists:
-                reset(uid)
+                await reset(uid)
                 await m.answer(f"该用户已是管理员：{user_id}")
                 return await show_admin_user_list(m)
 
@@ -2750,7 +2820,7 @@ async def all_messages(m: types.Message):
             await db.commit()
 
         await load_admin_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer(f"✅ 已添加管理员：{user_id}")
         return await show_admin_user_list(m)
 
@@ -2778,7 +2848,7 @@ async def all_messages(m: types.Message):
                 await db.commit()
 
             await reload_keyword_cache()
-            reset(uid)
+            await reset(uid)
             await m.answer(f"已添加 {added} 个关键词。\n已跳过 {existed} 个已存在关键词。")
             return await show_kw_list(m)
 
@@ -2794,18 +2864,19 @@ async def all_messages(m: types.Message):
             await db.refresh(row)
 
         await reload_keyword_cache()
-        user_state[uid] = "kw_add_text"
-        temp[uid] = {"id": row.id}
+        await set_state(uid, "kw_add_text")
+        await set_temp(uid, {"id": row.id})
         return await m.answer("已保存关键词。\n请输入回复文本，若跳过请输入 skip")
 
     if is_admin_user and state == "kw_add_text":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         value = (m.text or "").strip()
 
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
             if not k:
-                reset(uid)
+                await reset(uid)
                 return await m.answer("关键词不存在。")
 
             if value.lower() != "skip":
@@ -2813,12 +2884,13 @@ async def all_messages(m: types.Message):
                 await db.commit()
 
         await reload_keyword_cache()
-        user_state[uid] = "kw_add_image"
-        temp[uid] = {"id": kid}
+        await set_state(uid, "kw_add_image")
+        await set_temp(uid, {"id": kid})
         return await m.answer("请发送图片，或输入图片 URL / file_id。\n若跳过请输入 skip")
 
     if is_admin_user and state == "kw_add_image":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         raw = (m.text or "").strip().lower()
 
         image = None if raw == "skip" else extract_image_from_message(m)
@@ -2828,15 +2900,15 @@ async def all_messages(m: types.Message):
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
             if not k:
-                reset(uid)
+                await reset(uid)
                 return await m.answer("关键词不存在。")
             if image:
                 k.image = image
                 await db.commit()
 
         await reload_keyword_cache()
-        user_state[uid] = "kw_add_button"
-        temp[uid] = {"id": kid}
+        await set_state(uid, "kw_add_button")
+        await set_temp(uid, {"id": kid})
         return await m.answer(
             "请输入按钮。\n"
             "格式：Google - https://google.com && YouTube - https://youtube.com\n"
@@ -2845,13 +2917,14 @@ async def all_messages(m: types.Message):
         )
 
     if is_admin_user and state == "kw_add_button":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         value = (m.text or "").strip()
 
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
             if not k:
-                reset(uid)
+                await reset(uid)
                 return await m.answer("关键词不存在。")
 
             if value.lower() != "skip":
@@ -2859,12 +2932,13 @@ async def all_messages(m: types.Message):
                 await db.commit()
 
         await reload_keyword_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer("关键词创建完成。")
         return await show_kw_view(m, kid)
 
     if is_admin_user and state == "kw_edit_key":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         key = (m.text or "").strip()
         if not key:
             return await m.answer("关键词不能为空。")
@@ -2882,24 +2956,26 @@ async def all_messages(m: types.Message):
                 await db.commit()
 
         await reload_keyword_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer("关键词已更新。")
         return await show_kw_view(m, kid)
 
     if is_admin_user and state == "kw_edit_text":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
             if k:
                 k.text = m.text or ""
                 await db.commit()
         await reload_keyword_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer("文本已更新。")
         return await show_kw_view(m, kid)
 
     if is_admin_user and state == "kw_edit_image":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         image = extract_image_from_message(m)
         if not image:
             return await m.answer("请发送图片，或输入图片 URL / file_id。")
@@ -2909,19 +2985,20 @@ async def all_messages(m: types.Message):
                 k.image = image
                 await db.commit()
         await reload_keyword_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer("媒体已更新。")
         return await show_kw_view(m, kid)
 
     if is_admin_user and state == "kw_edit_button":
-        kid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        kid = tmp["id"]
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
             if k:
                 k.button = m.text or ""
                 await db.commit()
         await reload_keyword_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer("按钮已更新。")
         return await show_kw_view(m, kid)
 
@@ -2946,13 +3023,14 @@ async def all_messages(m: types.Message):
             await db.commit()
 
         await reload_banned_cache()
-        reset(uid)
+        await reset(uid)
         await m.answer(f"已添加 {added} 个禁词，跳过 {existed} 个已存在禁词。")
         return await show_banned_list(m)
 
     # ---- GROUP RENAME ----
     if is_admin_user and state == "group_rename":
-        chat_id = temp[uid]["chat_id"]
+        tmp = await get_temp(uid)
+        chat_id = tmp["chat_id"]
         new_title = (m.text or "").strip()
         if not new_title:
             return await m.answer("群名不能为空。")
@@ -2965,10 +3043,10 @@ async def all_messages(m: types.Message):
                     row.title = new_title[:128]
                     row.updated_at = int(time.time())
                     await db.commit()
-            reset(uid)
+            await reset(uid)
             return await m.answer(f"✅ 群名已更新：{new_title}", reply_markup=start_menu_kb(uid))
         except Exception as e:
-            reset(uid)
+            await reset(uid)
             return await m.answer(f"❌ 修改群名失败：{e}", reply_markup=start_menu_kb(uid))
 
     # ---- WELCOME ----
@@ -2982,21 +3060,23 @@ async def all_messages(m: types.Message):
                 return await m.answer("该 chat_id 已存在。")
             db.add(WelcomeSetting(chat_id=chat_id))
             await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("欢迎配置已创建。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "wl_edit_text":
-        wid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        wid = tmp["id"]
         async with SessionLocal() as db:
             w = await db.get(WelcomeSetting, wid)
             if w:
                 w.text = m.text or ""
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("欢迎文本已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "wl_edit_image":
-        wid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        wid = tmp["id"]
         image = extract_image_from_message(m)
         if not image:
             return await m.answer("请发送图片，或输入图片 URL / file_id。")
@@ -3005,21 +3085,23 @@ async def all_messages(m: types.Message):
             if w:
                 w.image = image
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("媒体已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "wl_edit_button":
-        wid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        wid = tmp["id"]
         async with SessionLocal() as db:
             w = await db.get(WelcomeSetting, wid)
             if w:
                 w.button = m.text or ""
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("按钮已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "wl_edit_delete_after":
-        wid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        wid = tmp["id"]
         try:
             minutes = int((m.text or "").strip())
             if minutes < 0:
@@ -3031,7 +3113,7 @@ async def all_messages(m: types.Message):
             if w:
                 w.delete_after = minutes
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("删除时间已更新。", reply_markup=start_menu_kb(uid))
 
     # ---- AUTO ----
@@ -3042,21 +3124,23 @@ async def all_messages(m: types.Message):
         async with SessionLocal() as db:
             db.add(AutoPost(chat_id=chat_id))
             await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("定时发送已创建。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_text":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         async with SessionLocal() as db:
             p = await db.get(AutoPost, pid)
             if p:
                 p.text = m.text or ""
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("文本已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_image":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         image = extract_image_from_message(m)
         if not image:
             return await m.answer("请发送图片，或输入图片 URL / file_id。")
@@ -3065,21 +3149,23 @@ async def all_messages(m: types.Message):
             if p:
                 p.image = image
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("媒体已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_button":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         async with SessionLocal() as db:
             p = await db.get(AutoPost, pid)
             if p:
                 p.button = m.text or ""
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("按钮已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_chat":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         chat_id = (m.text or "").strip()
         if not chat_id:
             return await m.answer("chat_id 无效。")
@@ -3088,11 +3174,12 @@ async def all_messages(m: types.Message):
             if p:
                 p.chat_id = chat_id
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("chat_id 已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_interval":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         try:
             interval = int((m.text or "").strip())
             if interval <= 0:
@@ -3104,11 +3191,12 @@ async def all_messages(m: types.Message):
             if p:
                 p.interval = interval
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("间隔时间已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_start":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         if not parse_dt(m.text or ""):
             return await m.answer("格式错误。请使用：YYYY-MM-DD HH:MM")
         async with SessionLocal() as db:
@@ -3116,11 +3204,12 @@ async def all_messages(m: types.Message):
             if p:
                 p.start_at = m.text.strip()
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("开始时间已更新。", reply_markup=start_menu_kb(uid))
 
     if is_admin_user and state == "auto_edit_end":
-        pid = temp[uid]["id"]
+        tmp = await get_temp(uid)
+        pid = tmp["id"]
         if not parse_dt(m.text or ""):
             return await m.answer("格式错误。请使用：YYYY-MM-DD HH:MM")
         async with SessionLocal() as db:
@@ -3128,7 +3217,7 @@ async def all_messages(m: types.Message):
             if p:
                 p.end_at = m.text.strip()
                 await db.commit()
-        reset(uid)
+        await reset(uid)
         return await m.answer("结束时间已更新。", reply_markup=start_menu_kb(uid))
 
     # ---- BANNED WORDS CHECK FOR ALL USERS ----
@@ -3168,7 +3257,7 @@ async def all_messages(m: types.Message):
     if matched:
         await send_preview(
             chat_id=m.chat.id,
-            text=matched.text,
+            text_=matched.text,
             image=matched.image,
             button=matched.button
         )
@@ -3211,7 +3300,7 @@ async def welcome_new_member(m: types.Message):
 
             msg = await send_preview(
                 chat_id=m.chat.id,
-                text=welcome_text,
+                text_=welcome_text,
                 image=w.image,
                 button=btn_text,
                 parse_mode="HTML"
@@ -3264,7 +3353,7 @@ async def auto_worker():
                     continue
 
                 try:
-                    msg = await send_preview(chat_id=p.chat_id, text=p.text, image=p.image, button=p.button)
+                    msg = await send_preview(chat_id=p.chat_id, text_=p.text, image=p.image, button=p.button)
 
                     async with SessionLocal() as db:
                         row = await db.get(AutoPost, p.id)
@@ -3326,6 +3415,26 @@ async def ensure_schema():
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def wait_for_redis(max_retries: int = 5, delay: int = 2):
+    if not redis_client:
+        print("[REDIS] disabled")
+        return
+
+    last_error = None
+    for i in range(max_retries):
+        try:
+            await redis_client.ping()
+            print("[REDIS] connected")
+            return
+        except Exception as e:
+            last_error = e
+            print(f"[REDIS] connect failed ({i+1}/{max_retries}): {e}")
+            await asyncio.sleep(delay)
+
+    print("[REDIS] unavailable, fallback to RAM")
+    # không raise để bot vẫn chạy
+
+
 @app.on_event("startup")
 async def startup():
     global worker_task
@@ -3336,6 +3445,9 @@ async def startup():
         print("[STARTUP] wait_for_db...")
         await wait_for_db()
         print("[STARTUP] wait_for_db OK")
+
+        print("[STARTUP] wait_for_redis...")
+        await wait_for_redis()
 
         print("[STARTUP] ensure_schema...")
         await ensure_schema()
@@ -3393,6 +3505,10 @@ async def shutdown():
 
     with contextlib.suppress(Exception):
         await bot.delete_webhook()
+
+    with contextlib.suppress(Exception):
+        if redis_client:
+            await redis_client.close()
 
     await bot.session.close()
 

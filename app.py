@@ -128,7 +128,24 @@ engine = create_async_engine(
 )
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
+async def wait_for_db(max_retries: int = 12, delay: int = 5):
+    last_error = None
 
+    for i in range(max_retries):
+        try:
+            print(f"[DB] trying connect ({i+1}/{max_retries})...")
+            async with asyncio.timeout(10):
+                async with engine.begin() as conn:
+                    await conn.execute(text("SELECT 1"))
+            print("[DB] connected")
+            return True
+        except Exception as e:
+            last_error = e
+            print(f"[DB] connect failed ({i+1}/{max_retries}): {repr(e)}")
+            await asyncio.sleep(delay)
+
+    raise last_error
+    
 redis_client = (
     redis.from_url(
         REDIS_URL,

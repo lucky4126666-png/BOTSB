@@ -42,13 +42,15 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
-REDIS_URL = os.getenv("REDIS_URL", "")
-
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 if not BOT_TOKEN or not BASE_URL or not DATABASE_URL:
     raise RuntimeError("缺少 BOT_TOKEN / BASE_URL / DATABASE_URL")
 
 BASE_URL = BASE_URL.rstrip("/")
-
+REDIS_URL = os.getenv("REDIS_URL", "")
 
 def normalize_database_url(url: str):
     if url.startswith("postgres://"):

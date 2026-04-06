@@ -5,8 +5,13 @@ import contextlib
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
+from jinja2 import pass_context
+
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -42,9 +47,41 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", "change-this-session-secret")
+)
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+
+@pass_context
+def _jinja_url_for(context, name: str, **path_params):
+    """
+    Hỗ trợ cả:
+    - url_for('dashboard')
+    - url_for('static', filename='style.css')  (Flask style)
+    - url_for('static', path='style.css')      (FastAPI style)
+    """
+    request: Request = context["request"]
+
+    if "filename" in path_params and "path" not in path_params:
+        path_params["path"] = path_params.pop("filename")
+
+    return request.url_for(name, **path_params)
+
+
+templates.env.globals["url_for"] = _jinja_url_for
+templates.env.globals["get_flashed_messages"] = lambda *args, **kwargs: []
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -98,6 +135,14 @@ LANG_TEXT = {
 }
 
 
+def allowed_admin_ids():
+    ids = set(admin_cache) | set(ADMIN_IDS)
+    if OWNER_ID:
+        ids.add(OWNER_ID)
+    ids.discard(0)
+    return ids
+
+
 def get_lang(uid: int) -> str:
     return selected_lang.get(uid, "zh")
 
@@ -117,6 +162,24 @@ def can_change_language(user_id: int) -> bool:
 
 def check_web_key(key: Optional[str]) -> bool:
     return bool(WEB_ADMIN_KEY) and key == WEB_ADMIN_KEY
+
+
+def web_authenticated(request: Request, key: str = "") -> bool:
+    if request.session.get("web_admin"):
+        return True
+    if key and check_web_key(key):
+        request.session["web_admin"] = True
+        return True
+    return False
+
+
+def web_base_context(request: Request, active_page: str = "", **kwargs):
+    return {
+        "request": request,
+        "active_page": active_page,
+        "current_year": datetime.now().year,
+        **kwargs
+    }
 
 
 def reset(uid):
@@ -411,6 +474,16 @@ async def get_all_groups():
     return groups
 
 
+async def fetch_web_data():
+    async with SessionLocal() as db:
+        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
+        groups = (await db.execute(select(BotGroup).order_by(BotGroup.id.desc()))).scalars().all()
+        keywords = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
+        welcomes = (await db.execute(select(WelcomeSetting).order_by(WelcomeSetting.id.desc()))).scalars().all()
+        autos = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
+    return admins, groups, keywords, welcomes, autos
+
+
 async def show_kw_list(message):
     async with SessionLocal() as db:
         rows = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
@@ -564,81 +637,6 @@ async def show_auto_view(message, pid):
             [InlineKeyboardButton(text="⬅️ 返回", callback_data="auto_list")],
         ])
     )
-
-
-def render_admin_page(admins, key="", msg=""):
-    rows = ""
-    for a in admins:
-        created = "-"
-        if a.created_at:
-            created = datetime.fromtimestamp(a.created_at).strftime("%Y-%m-%d %H:%M:%S")
-
-        if a.user_id == OWNER_ID:
-            action = "<b>OWNER</b>"
-        else:
-            action = f"""
-            <form method="post" action="/admin/delete" style="display:inline">
-                <input type="hidden" name="key" value="{key}">
-                <input type="hidden" name="user_id" value="{a.user_id}">
-                <button type="submit">删除</button>
-            </form>
-            """
-
-        rows += f"""
-        <tr>
-            <td>{a.user_id}</td>
-            <td>{a.note or ""}</td>
-            <td>{created}</td>
-            <td>{action}</td>
-        </tr>
-        """
-
-    return f"""
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>ADMIN 管理面板</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; padding: 24px; background: #f6f7fb; }}
-            .box {{ background: white; padding: 20px; border-radius: 12px; max-width: 900px; margin: auto; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
-            th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
-            th {{ background: #f0f0f0; }}
-            input, button {{ padding: 10px; margin: 4px 0; }}
-            .msg {{ color: green; margin-bottom: 12px; }}
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <h2>ADMIN 管理面板</h2>
-            {f'<div class="msg">{msg}</div>' if msg else ''}
-            <form method="post" action="/admin/add">
-                <input type="hidden" name="key" value="{key}">
-                <div>
-                    <label>User ID</label><br>
-                    <input type="number" name="user_id" placeholder="输入 Telegram user_id" required>
-                </div>
-                <div>
-                    <label>备注</label><br>
-                    <input type="text" name="note" placeholder="例如：客服 / 运营">
-                </div>
-                <button type="submit">添加 ADMIN</button>
-            </form>
-
-            <h3>当前 ADMIN 列表</h3>
-            <table>
-                <tr>
-                    <th>User ID</th>
-                    <th>备注</th>
-                    <th>创建时间</th>
-                    <th>操作</th>
-                </tr>
-                {rows}
-            </table>
-        </div>
-    </body>
-    </html>
-    """
 
 
 # ======================
@@ -1319,30 +1317,178 @@ async def auto_del(c: types.CallbackQuery):
 
 
 # ======================
-# WEB ADMIN PANEL
+# WEB ADMIN TEMPLATE ROUTES
 # ======================
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_panel(key: str = ""):
-    if not check_web_key(key):
-        return HTMLResponse("<h3>403 Forbidden</h3>", status_code=403)
+@app.get("/admin", response_class=HTMLResponse, name="admin_root")
+async def admin_root(request: Request, key: str = ""):
+    if web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("dashboard"), status_code=303)
+    return templates.TemplateResponse(
+        "login.html",
+        web_base_context(request, active_page="login")
+    )
 
-    async with SessionLocal() as db:
-        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
 
-    return HTMLResponse(render_admin_page(admins, key=key))
+@app.get("/admin/login", response_class=HTMLResponse, name="login")
+async def admin_login_page(request: Request, key: str = ""):
+    if web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("dashboard"), status_code=303)
+    return templates.TemplateResponse(
+        "login.html",
+        web_base_context(request, active_page="login")
+    )
 
 
-@app.post("/admin/add", response_class=HTMLResponse)
-async def admin_add(
-    key: str = Form(""),
+@app.post("/admin/login", response_class=HTMLResponse, name="login_post")
+async def admin_login_submit(request: Request, key: str = Form("")):
+    if web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("dashboard"), status_code=303)
+    return templates.TemplateResponse(
+        "login.html",
+        web_base_context(
+            request,
+            active_page="login",
+            error="Invalid key"
+        ),
+        status_code=401
+    )
+
+
+@app.get("/admin/logout", response_class=HTMLResponse, name="logout")
+async def admin_logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse, name="dashboard")
+async def admin_dashboard(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+    admins, groups, keywords, welcomes, autos = await fetch_web_data()
+    allowed_ids = allowed_admin_ids()
+
+    stats = [
+        {
+            "label": "Allowed admins",
+            "value": str(len(allowed_ids)),
+            "note": "OWNER + ENV + DB",
+            "icon": "bi-people-fill",
+            "color": "primary",
+        },
+        {
+            "label": "Groups",
+            "value": str(len(groups)),
+            "note": "Tracked groups",
+            "icon": "bi-collection",
+            "color": "success",
+        },
+        {
+            "label": "Keywords",
+            "value": str(len(keywords)),
+            "note": "Auto reply rules",
+            "icon": "bi-lightning-charge-fill",
+            "color": "warning",
+        },
+        {
+            "label": "Auto posts",
+            "value": str(len(autos)),
+            "note": "Scheduled tasks",
+            "icon": "bi-calendar2-check-fill",
+            "color": "danger",
+        },
+    ]
+
+    now_str = datetime.now().strftime("%H:%M")
+    recent_logs = [
+        {
+            "time": now_str,
+            "user": "system",
+            "action": "Webhook initialized",
+            "status": "Ready",
+            "badge_class": "bg-success",
+        },
+        {
+            "time": now_str,
+            "user": "system",
+            "action": "Database schema loaded",
+            "status": "OK",
+            "badge_class": "bg-primary",
+        },
+        {
+            "time": now_str,
+            "user": "system",
+            "action": "Admin cache loaded",
+            "status": "OK",
+            "badge_class": "bg-success",
+        },
+        {
+            "time": now_str,
+            "user": "system",
+            "action": f"Welcome rules: {len(welcomes)}",
+            "status": "Live",
+            "badge_class": "bg-warning text-dark",
+        },
+    ]
+
+    system_info = [
+        {"label": "Bot username", "value": BOT_USERNAME},
+        {"label": "Owner ID", "value": str(OWNER_ID) if OWNER_ID else "-"},
+        {"label": "Admins allowed", "value": str(len(allowed_ids))},
+        {"label": "Groups", "value": str(len(groups))},
+        {"label": "Keywords", "value": str(len(keywords))},
+        {"label": "Welcome rules", "value": str(len(welcomes))},
+        {"label": "OpenAI", "value": "Enabled" if openai_client else "Disabled"},
+        {"label": "BASE_URL", "value": BASE_URL},
+    ]
+
+    return templates.TemplateResponse(
+        "dashboard.html",
+        web_base_context(
+            request,
+            active_page="dashboard",
+            stats=stats,
+            recent_logs=recent_logs,
+            system_info=system_info,
+        )
+    )
+
+
+@app.get("/admin/logs", response_class=HTMLResponse, name="logs")
+async def admin_logs(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+    return templates.TemplateResponse(
+        "logs.html",
+        web_base_context(request, active_page="logs")
+    )
+
+
+@app.get("/admin/admins", response_class=HTMLResponse, name="admins")
+async def admin_admins(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+    admins, groups, keywords, welcomes, autos = await fetch_web_data()
+    return templates.TemplateResponse(
+        "admins.html",
+        web_base_context(request, active_page="admins", admins=admins)
+    )
+
+
+@app.post("/admin/admins/add", response_class=HTMLResponse, name="admins_add")
+async def admin_admins_add(
+    request: Request,
     user_id: int = Form(...),
-    note: str = Form("")
+    note: str = Form(""),
+    key: str = Form("")
 ):
-    if not check_web_key(key):
-        return HTMLResponse("<h3>403 Forbidden</h3>", status_code=403)
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
 
     if user_id == OWNER_ID:
-        return HTMLResponse("<h3>OWNER 已经是主控，不需要添加。</h3>")
+        raise HTTPException(status_code=400, detail="不能添加 OWNER")
 
     async with SessionLocal() as db:
         exists = (await db.execute(
@@ -1351,44 +1497,90 @@ async def admin_add(
 
         if exists:
             exists.note = note.strip()
-            await db.commit()
         else:
             db.add(AdminUser(
                 user_id=user_id,
                 note=note.strip(),
                 created_at=int(time.time())
             ))
-            await db.commit()
+        await db.commit()
 
     await load_admin_cache()
-
-    async with SessionLocal() as db:
-        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
-
-    return HTMLResponse(render_admin_page(admins, key=key, msg="已添加/更新 ADMIN"))
+    return RedirectResponse(url=request.url_for("admins"), status_code=303)
 
 
-@app.post("/admin/delete", response_class=HTMLResponse)
-async def admin_delete(
-    key: str = Form(""),
-    user_id: int = Form(...)
+@app.post("/admin/admins/delete", response_class=HTMLResponse, name="admins_delete")
+async def admin_admins_delete(
+    request: Request,
+    user_id: int = Form(...),
+    key: str = Form("")
 ):
-    if not check_web_key(key):
-        return HTMLResponse("<h3>403 Forbidden</h3>", status_code=403)
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
 
     if user_id == OWNER_ID:
-        return HTMLResponse("<h3>不能删除 OWNER</h3>")
+        raise HTTPException(status_code=400, detail="不能删除 OWNER")
 
     async with SessionLocal() as db:
         await db.execute(delete(AdminUser).where(AdminUser.user_id == user_id))
         await db.commit()
 
     await load_admin_cache()
+    return RedirectResponse(url=request.url_for("admins"), status_code=303)
+
+
+@app.get("/admin/groups", response_class=HTMLResponse, name="groups")
+async def admin_groups(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+    groups = await get_all_groups()
+    return templates.TemplateResponse(
+        "groups.html",
+        web_base_context(request, active_page="groups", groups=groups)
+    )
+
+
+@app.get("/admin/keywords", response_class=HTMLResponse, name="keywords")
+async def admin_keywords(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
 
     async with SessionLocal() as db:
-        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
+        keywords = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
 
-    return HTMLResponse(render_admin_page(admins, key=key, msg="已删除 ADMIN"))
+    return templates.TemplateResponse(
+        "keywords.html",
+        web_base_context(request, active_page="keywords", keywords=keywords)
+    )
+
+
+@app.get("/admin/welcome", response_class=HTMLResponse, name="welcome")
+async def admin_welcome(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+    async with SessionLocal() as db:
+        welcomes = (await db.execute(select(WelcomeSetting).order_by(WelcomeSetting.id.desc()))).scalars().all()
+
+    return templates.TemplateResponse(
+        "welcome.html",
+        web_base_context(request, active_page="welcome", welcomes=welcomes)
+    )
+
+
+@app.get("/admin/auto", response_class=HTMLResponse, name="auto")
+async def admin_auto(request: Request, key: str = ""):
+    if not web_authenticated(request, key):
+        return RedirectResponse(url=request.url_for("login"), status_code=303)
+
+    async with SessionLocal() as db:
+        autos = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
+
+    return templates.TemplateResponse(
+        "auto.html",
+        web_base_context(request, active_page="auto", autos=autos)
+    )
 
 
 # ======================
@@ -1402,8 +1594,9 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
-    # Người lạ nhắn riêng bất kỳ gì (không phải command) -> trả đúng text HTML
     text_ = (m.text or m.caption or "").strip()
+
+    # Người lạ nhắn riêng bất kỳ gì (không phải command) -> trả đúng text HTML
     if m.chat.type == "private" and not is_allowed_user(uid):
         if not text_ or text_.startswith("/"):
             return
@@ -1916,3 +2109,10 @@ async def shutdown():
         await bot.delete_webhook()
 
     await bot.session.close()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

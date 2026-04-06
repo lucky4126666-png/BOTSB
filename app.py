@@ -3,6 +3,7 @@ import time
 import asyncio
 import contextlib
 from datetime import datetime
+from typing import Optional
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
@@ -32,7 +33,6 @@ ADMIN_IDS = {
     int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-
 WEB_ADMIN_KEY = os.getenv("WEB_ADMIN_KEY", "")
 
 bot = Bot(token=BOT_TOKEN)
@@ -44,7 +44,6 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 Base = declarative_base()
 
 worker_task = None
-last_sent = {}
 
 user_state = {}
 temp = {}
@@ -54,7 +53,7 @@ private_menu_msg = {}
 admin_cache = set()
 
 STRANGER_START_TEXT = "欢迎使用机器人，请点击下方按钮："
-INIT_GROUP_TEXT = "组防骗助手为您服务,我正在进行相关初始化配置请稍后"
+INIT_GROUP_TEXT = "组防骗助手为您服务，我正在进行相关初始化配置请稍后"
 
 
 def is_allowed_user(user_id: int) -> bool:
@@ -91,11 +90,14 @@ def init_group_kb():
     ])
 
 
-async def load_admin_cache():
-    global admin_cache
-    async with SessionLocal() as db:
-        rows = (await db.execute(select(AdminUser))).scalars().all()
-    admin_cache = {r.user_id for r in rows}
+def reset(uid):
+    user_state.pop(uid, None)
+    temp.pop(uid, None)
+
+
+async def ack(c: types.CallbackQuery, text: Optional[str] = None):
+    with contextlib.suppress(Exception):
+        await c.answer(text=text)
 
 
 async def allowed_or_ignore(c: types.CallbackQuery):
@@ -103,16 +105,6 @@ async def allowed_or_ignore(c: types.CallbackQuery):
         await ack(c)
         return False
     return True
-
-
-def reset(uid):
-    user_state.pop(uid, None)
-    temp.pop(uid, None)
-
-
-async def ack(c: types.CallbackQuery, text: str | None = None):
-    with contextlib.suppress(Exception):
-        await c.answer(text=text)
 
 
 # ======================
@@ -265,7 +257,7 @@ class AdminUser(Base):
 # ======================
 # MENUS
 # ======================
-def start_menu_kb(uid: int | None = None):
+def start_menu_kb(uid: Optional[int] = None):
     kb = [
         [InlineKeyboardButton(text="👑 管理员设置", callback_data="admin_menu")],
         [InlineKeyboardButton(text="👥 群组管理", callback_data="group_menu")],
@@ -343,6 +335,13 @@ def auto_menu_kb():
 # ======================
 # HELPERS
 # ======================
+async def load_admin_cache():
+    global admin_cache
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(AdminUser))).scalars().all()
+    admin_cache = {r.user_id for r in rows}
+
+
 async def get_admin_groups():
     async with SessionLocal() as db:
         groups = (await db.execute(
@@ -653,7 +652,7 @@ async def start(m: types.Message):
 
     uid = m.from_user.id
 
-    # Người lạ: chỉ hiện 1 tin + nút
+    # Người lạ: chỉ hiện 1 tin + nút bấm
     if not is_allowed_user(uid):
         await m.answer(
             STRANGER_START_TEXT,

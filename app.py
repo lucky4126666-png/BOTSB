@@ -120,8 +120,259 @@ class AutoPost(Base):
     last_sent_ts = Column(Integer, default=0)
 
 # ======================
-# KEYBOARDS
+# SELECTED DATA
 # ======================
+selected_group = {}
+selected_lang = {}
+
+# ======================
+# MODEL: BOT GROUPS
+# ======================
+
+class BotGroup(Base):
+    __tablename__ = "bot_groups"
+
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String, unique=True, index=True)
+    title = Column(String, default="")
+    type = Column(String, default="group")
+    is_admin = Column(Integer, default=0)
+    updated_at = Column(Integer, default=0)
+
+# ======================
+# START MENUS
+# ======================
+def start_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👑 ADMIN + Cài đặt", callback_data="admin_menu")],
+        [InlineKeyboardButton(text="👥 NHÓM", callback_data="group_menu")],
+        [InlineKeyboardButton(text="🌐 Languages", callback_data="lang_menu")],
+    ])
+
+def admin_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📌 Từ khoá", callback_data="kw_menu")],
+        [InlineKeyboardButton(text="👋 Chào mừng nhóm", callback_data="wl_menu")],
+        [InlineKeyboardButton(text="📅 Auto Post", callback_data="auto_menu")],
+        [InlineKeyboardButton(text="⬅️ Trở lại", callback_data="back_start")],
+    ])
+
+def group_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Danh sách nhóm", callback_data="group_list")],
+        [InlineKeyboardButton(text="➕ Chọn nhóm", callback_data="group_pick")],
+        [InlineKeyboardButton(text="⬅️ Trở lại", callback_data="back_start")],
+    ])
+
+def lang_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🇻🇳 Tiếng Việt", callback_data="lang_vi")],
+        [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en")],
+        [InlineKeyboardButton(text="⬅️ Trở lại", callback_data="back_start")],
+    ])
+
+def group_select_kb(groups):
+    kb = []
+    for g in groups:
+        title = g.title or g.chat_id
+        admin_mark = " 👑" if g.is_admin else ""
+        kb.append([
+            InlineKeyboardButton(
+                text=f"{title}{admin_mark}",
+                callback_data=f"pick_group_{g.chat_id}"
+            )
+        ])
+    kb.append([InlineKeyboardButton(text="⬅️ Trở lại", callback_data="back_start")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+# ======================
+# HELPERS
+# ======================
+async def get_admin_groups():
+    async with SessionLocal() as db:
+        groups = (await db.execute(
+            select(BotGroup).where(BotGroup.is_admin == 1).order_by(BotGroup.id.desc())
+        )).scalars().all()
+    return groups
+
+async def get_all_groups():
+    async with SessionLocal() as db:
+        groups = (await db.execute(
+            select(BotGroup).order_by(BotGroup.id.desc())
+        )).scalars().all()
+    return groups
+
+# ======================
+# TRACK BOT IN GROUP
+# ======================
+@dp.my_chat_member()
+async def track_bot_membership(event: types.ChatMemberUpdated):
+    chat = event.chat
+    new_status = event.new_chat_member.status
+
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    chat_id = str(chat.id)
+    now_ts = int(time.time())
+
+    # Bot được thêm vào nhóm / lên admin
+    if new_status in ("member", "administrator"):
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(BotGroup).where(BotGroup.chat_id == chat_id)
+            )).scalars().first()
+
+            if not row:
+                row = BotGroup(
+                    chat_id=chat_id,
+                    title=chat.title or "",
+                    type=chat.type,
+                    is_admin=1 if new_status == "administrator" else 0,
+                    updated_at=now_ts
+                )
+                db.add(row)
+            else:
+                row.title = chat.title or row.title
+                row.type = chat.type
+                row.is_admin = 1 if new_status == "administrator" else 0
+                row.updated_at = now_ts
+
+            await db.commit()
+
+    # Bot rời nhóm / bị kick
+    if new_status in ("left", "kicked"):
+        async with SessionLocal() as db:
+            await db.execute(delete(BotGroup).where(BotGroup.chat_id == chat_id))
+            await db.commit()
+            # xoá group đã chọn nếu đang chọn đúng group đó
+            for uid, gid in list(selected_group.items()):
+                if gid == chat_id:
+                    selected_group.pop(uid, None)
+
+# ======================
+# /START
+# ======================
+@dp.message(F.text == "/start")
+async def start(m: types.Message):
+    if not m.from_user:
+        return
+
+    reset(m.from_user.id)
+
+    groups = await get_admin_groups()
+
+    # Nếu có nhóm thì hiện danh sách nhóm trước
+    if groups:
+        await m.answer("👥 Chọn nhóm để quản lý:", reply_markup=group_select_kb(groups))
+        return
+
+    # Nếu chưa có nhóm thì vào trang chủ
+    await m.answer("🏠 Trang chủ", reply_markup=start_menu_kb())
+
+@dp.callback_query(F.data == "back_start")
+async def back_start(c: types.CallbackQuery):
+    await c.answer()
+    await safe_edit(c.message, "🏠 Trang chủ", reply_markup=start_menu_kb())
+
+# ======================
+# MAIN MENU
+# ======================
+@dp.callback_query(F.data == "admin_menu")
+async def admin_menu(c: types.CallbackQuery):
+    await c.answer()
+    await safe_edit(c.message, "👑 ADMIN + Cài đặt", reply_markup=admin_menu_kb())
+
+@dp.callback_query(F.data == "group_menu")
+async def group_menu(c: types.CallbackQuery):
+    await c.answer()
+    groups = await get_all_groups()
+
+    if not groups:
+        return await safe_edit(
+            c.message,
+            "👥 NHÓM\n\nChưa có nhóm nào được lưu.",
+            reply_markup=group_menu_kb()
+        )
+
+    await safe_edit(
+        c.message,
+        "👥 NHÓM\n\nChọn nhóm để quản lý.",
+        reply_markup=group_menu_kb()
+    )
+
+@dp.callback_query(F.data == "lang_menu")
+async def lang_menu(c: types.CallbackQuery):
+    await c.answer()
+    await safe_edit(c.message, "🌐 Languages", reply_markup=lang_menu_kb())
+
+@dp.callback_query(F.data == "group_list")
+async def group_list(c: types.CallbackQuery):
+    await c.answer()
+    groups = await get_all_groups()
+
+    kb = []
+    for g in groups:
+        kb.append([
+            InlineKeyboardButton(
+                text=f"{g.title or g.chat_id} ({'ADMIN' if g.is_admin else 'MEMBER'})",
+                callback_data=f"pick_group_{g.chat_id}"
+            )
+        ])
+    kb.append([InlineKeyboardButton(text="⬅️ Trở lại", callback_data="group_menu")])
+
+    await safe_edit(
+        c.message,
+        "📋 Danh sách nhóm",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+@dp.callback_query(F.data == "group_pick")
+async def group_pick(c: types.CallbackQuery):
+    await c.answer()
+    groups = await get_all_groups()
+
+    if not groups:
+        return await c.message.answer("Chưa có nhóm nào.")
+
+    await safe_edit(
+        c.message,
+        "➕ Chọn nhóm:",
+        reply_markup=group_select_kb(groups)
+    )
+
+@dp.callback_query(F.data.startswith("pick_group_"))
+async def pick_group(c: types.CallbackQuery):
+    await c.answer()
+    chat_id = c.data.replace("pick_group_", "")
+    uid = c.from_user.id
+
+    selected_group[uid] = chat_id
+
+    async with SessionLocal() as db:
+        g = (await db.execute(
+            select(BotGroup).where(BotGroup.chat_id == chat_id)
+        )).scalars().first()
+
+    title = g.title if g and g.title else chat_id
+
+    await safe_edit(
+        c.message,
+        f"✅ Đã chọn nhóm:\n{title}\n\n🏠 Trang chủ",
+        reply_markup=start_menu_kb()
+    )
+
+@dp.callback_query(F.data == "lang_vi")
+async def lang_vi(c: types.CallbackQuery):
+    await c.answer()
+    selected_lang[c.from_user.id] = "vi"
+    await safe_edit(c.message, "✅ Đã chọn: Tiếng Việt", reply_markup=start_menu_kb())
+
+@dp.callback_query(F.data == "lang_en")
+async def lang_en(c: types.CallbackQuery):
+    await c.answer()
+    selected_lang[c.from_user.id] = "en"
+    await safe_edit(c.message, "✅ Selected: English", reply_markup=start_menu_kb())
 def home():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📌 Từ khoá", callback_data="kw_menu")],

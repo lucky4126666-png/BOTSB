@@ -3432,8 +3432,6 @@ async def wait_for_redis(max_retries: int = 5, delay: int = 2):
             await asyncio.sleep(delay)
 
     print("[REDIS] unavailable, fallback to RAM")
-    # không raise để bot vẫn chạy
-
 
 @app.on_event("startup")
 async def startup():

@@ -1251,7 +1251,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("Đã cập nhật ngày kết thúc.", reply_markup=start_menu_kb())
 
-       # ---- KEYWORD AUTO REPLY ----
+    # ---- KEYWORD AUTO REPLY ----
     text_ = (m.text or m.caption or "").strip()
     if not text_ or text_.startswith("/"):
         return
@@ -1289,7 +1289,8 @@ async def all_messages(m: types.Message):
             button=matched.button
         )
     else:
-        print("[KW NO MATCH]") 
+        print("[KW NO MATCH]")
+
 
 # ======================
 # WELCOME NEW MEMBER
@@ -1408,7 +1409,7 @@ async def ensure_schema():
         await conn.run_sync(Base.metadata.create_all)
 
 
-@@app.on_event("startup")
+@app.on_event("startup")
 async def startup():
     global worker_task
 

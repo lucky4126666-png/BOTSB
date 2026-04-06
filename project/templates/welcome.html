@@ -1,1 +1,45 @@
+html
+{% extends "base.html" %}
 
+{% block title %}Welcome{% endblock %}
+{% block page_title %}Welcome{% endblock %}
+{% block page_subtitle %}Danh sách cấu hình chào mừng{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Welcome Settings</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Chat ID</th>
+          <th>Active</th>
+          <th>Delete After</th>
+          <th>Pin</th>
+          <th>Text</th>
+          <th>Image</th>
+          <th>Button</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for w in welcomes %}
+        <tr>
+          <td>{{ w.id }}</td>
+          <td>{{ w.chat_id }}</td>
+          <td>{{ "✅" if w.active else "❌" }}</td>
+          <td>{{ w.delete_after }}</td>
+          <td>{{ "✅" if w.pin else "❌" }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ w.text }}</td>
+          <td class="text-truncate" style="max-width:160px">{{ w.image }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ w.button }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

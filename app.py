@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from html import escape
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -174,10 +174,12 @@ AI_AGENT_SYSTEM_PROMPT = """
    set_welcome_text
    set_welcome_button
    toggle_welcome
-5. 不要创造未授权动作。
-6. 高风险动作（rename_group, lock_group, unlock_group）请设置 need_confirm=true。
-7. 如果信息不全，设置 need_more=true，并提出最简短问题。
-8. 输出格式固定：
+5. 不允许添加管理员、删除管理员、修改 OWNER 权限。
+6. 如果用户提到管理员权限，请引导他使用菜单：
+   管理员设置 -> 管理员权限
+7. 高风险动作（rename_group, lock_group, unlock_group）请设置 need_confirm=true。
+8. 如果信息不全，设置 need_more=true，并提出最简短问题。
+9. 输出格式固定：
 {
   "action": "...",
   "need_confirm": false,
@@ -281,6 +283,10 @@ async def allowed_or_ignore(c: types.CallbackQuery):
     return True
 
 
+# ======================
+# BUTTON / TEXT HELPERS
+# ======================
+
 def parse_buttons(text):
     if not text:
         return None
@@ -368,11 +374,23 @@ def parse_dt(s: str):
         return None
 
 
+def extract_first_int(text: str):
+    if not text:
+        return None
+    buf = ""
+    for ch in text:
+        if ch.isdigit():
+            buf += ch
+        elif buf:
+            break
+    return int(buf) if buf else None
+
+
 def default_welcome_button_text():
     return WELCOME_DEFAULT_BUTTONS
 
 
-async def is_chat_admin(bot_: Bot, chat_id: int | str, user_id: int) -> bool:
+async def is_chat_admin(bot_: Bot, chat_id: Union[int, str], user_id: int) -> bool:
     try:
         member = await bot_.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
@@ -380,7 +398,7 @@ async def is_chat_admin(bot_: Bot, chat_id: int | str, user_id: int) -> bool:
         return False
 
 
-async def lock_group(chat_id: int | str):
+async def lock_group(chat_id: Union[int, str]):
     await bot.set_chat_permissions(
         chat_id=chat_id,
         permissions=ChatPermissions(
@@ -401,7 +419,7 @@ async def lock_group(chat_id: int | str):
     )
 
 
-async def unlock_group(chat_id: int | str):
+async def unlock_group(chat_id: Union[int, str]):
     await bot.set_chat_permissions(
         chat_id=chat_id,
         permissions=ChatPermissions(
@@ -446,7 +464,6 @@ def build_group_title_from_form(data: dict) -> str:
     number = (data.get("编号") or "").strip()
     rule = (data.get("规则") or "").strip().replace(" ", "")
     name = (data.get("名字") or "").strip()
-
     title = f"{group_name} {number}-{rule} {name}".strip()
     return title[:128]
 
@@ -491,7 +508,143 @@ def build_welcome_text(template: str, user: types.User, chat_title: str = "", ch
     return text
 
 
+def parse_local_ai_agent_request(text: str):
+    raw = (text or "").strip()
+    lower = raw.lower()
+
+    if any(x in lower for x in [
+        "hướng dẫn", "cách dùng", "cách sử dụng", "help", "how to use",
+        "怎么用", "如何使用", "如何添加关键词"
+    ]):
+        return {
+            "action": "help",
+            "need_confirm": False,
+            "need_more": False,
+            "question": "",
+            "reply": (
+                "📘 Hướng dẫn nhanh:\n\n"
+                "1. Thêm từ khóa:\n"
+                "- Vào: 管理员设置 -> 关键词 -> 添加\n"
+                "- Hoặc nói: 帮我添加关键词 上課\n\n"
+                "2. Đổi tên nhóm:\n"
+                "- Chọn nhóm trước\n"
+                "- Nói: đổi tên nhóm thành E88\n\n"
+                "3. Khóa / mở nhóm:\n"
+                "- Nói: 锁群 / 开群\n\n"
+                "4. Quản lý welcome:\n"
+                "- Vào: 群组欢迎\n"
+                "- Dùng biến: (*name*), (*group*), (*groupid*), (*rand*)\n\n"
+                "5. Cấp quyền admin:\n"
+                "- Vào: 管理员设置 -> 管理员权限\n"
+                "- Chỉ OWNER mới dùng được\n\n"
+                "6. Thoát AI 管家:\n"
+                "- /cancel"
+            ),
+            "params": {}
+        }
+
+    if raw in ["开群", "mở nhóm", "mo nhom", "unlock group", "unlock"]:
+        return {
+            "action": "unlock_group",
+            "need_confirm": True,
+            "need_more": False,
+            "question": "",
+            "reply": "",
+            "params": {}
+        }
+
+    if raw in ["锁群", "khoá nhóm", "khóa nhóm", "khoa nhom", "lock group", "lock"]:
+        return {
+            "action": "lock_group",
+            "need_confirm": True,
+            "need_more": False,
+            "question": "",
+            "reply": "",
+            "params": {}
+        }
+
+    if any(x in lower for x in ["đổi tên nhóm", "doi ten nhom", "改群名", "修改群名"]):
+        title = ""
+        for sep in ["thành", "为", "成", "to"]:
+            if sep in lower:
+                idx = lower.find(sep)
+                title = raw[idx + len(sep):].strip()
+                break
+
+        if not title:
+            return {
+                "action": "rename_group",
+                "need_confirm": False,
+                "need_more": True,
+                "question": "请提供新名称。",
+                "reply": "",
+                "params": {}
+            }
+
+        return {
+            "action": "rename_group",
+            "need_confirm": True,
+            "need_more": False,
+            "question": "",
+            "reply": "",
+            "params": {"title": title}
+        }
+
+    if any(x in raw for x in ["帮我添加关键词", "添加关键词", "thêm từ khoá", "thêm từ khóa", "add keyword"]):
+        key = raw
+        for prefix in ["帮我添加关键词", "添加关键词", "thêm từ khoá", "thêm từ khóa", "add keyword"]:
+            if prefix.lower() in lower:
+                pos = lower.find(prefix.lower())
+                key = raw[pos + len(prefix):].strip()
+                break
+
+        if not key:
+            return {
+                "action": "add_keyword",
+                "need_confirm": False,
+                "need_more": True,
+                "question": "缺少关键词，请发送关键词内容。",
+                "reply": "",
+                "params": {}
+            }
+
+        return {
+            "action": "add_keyword",
+            "need_confirm": False,
+            "need_more": False,
+            "question": "",
+            "reply": "",
+            "params": {"key": key}
+        }
+
+    if any(x in lower for x in ["cấp quyền admin", "thêm admin", "添加管理员", "add admin"]):
+        return {
+            "action": "help",
+            "need_confirm": False,
+            "need_more": False,
+            "question": "",
+            "reply": "请使用菜单：管理员设置 -> 管理员权限。只有 OWNER 可以添加或删除管理员。",
+            "params": {}
+        }
+
+    if any(x in lower for x in ["set welcome", "设置欢迎词", "đặt welcome", "sửa welcome", "welcome text"]):
+        return {
+            "action": "set_welcome_text",
+            "need_confirm": False,
+            "need_more": True,
+            "question": "请发送欢迎文本内容。",
+            "reply": "",
+            "params": {}
+        }
+
+    return None
+
+
 async def ai_agent_parse(user_text: str):
+    local_result = parse_local_ai_agent_request(user_text)
+    if local_result:
+        return local_result
+
     if not openai_client:
         return {
             "action": "help",
@@ -619,6 +772,7 @@ def start_menu_kb(uid: Optional[int] = None):
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 管理员权限", callback_data="admin_user_menu")],
         [InlineKeyboardButton(text="📌 关键词", callback_data="kw_menu")],
         [InlineKeyboardButton(text="👋 群组欢迎", callback_data="wl_menu")],
         [InlineKeyboardButton(text="📅 定时发送", callback_data="auto_menu")],
@@ -627,6 +781,14 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="🌐 语言", callback_data="lang_menu")],
         [InlineKeyboardButton(text="🤖 OpenAI", callback_data="ai_menu")],
         [InlineKeyboardButton(text="⬅️ 返回", callback_data="back_start")],
+    ])
+
+
+def admin_user_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ 添加管理员", callback_data="admin_user_add")],
+        [InlineKeyboardButton(text="📋 管理员列表", callback_data="admin_user_list")],
+        [InlineKeyboardButton(text="⬅️ 返回", callback_data="admin_menu")],
     ])
 
 
@@ -699,7 +861,7 @@ def ban_menu_kb():
 
 
 # ======================
-# HELPERS
+# DB / VIEW HELPERS
 # ======================
 
 async def load_admin_cache():
@@ -733,6 +895,43 @@ async def fetch_web_data():
         welcomes = (await db.execute(select(WelcomeSetting).order_by(WelcomeSetting.id.desc()))).scalars().all()
         autos = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
     return admins, groups, keywords, welcomes, autos
+
+
+async def show_admin_user_list(message):
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(AdminUser).order_by(AdminUser.id.desc())
+        )).scalars().all()
+
+    kb = []
+
+    if OWNER_ID:
+        kb.append([
+            InlineKeyboardButton(
+                text=f"👑 OWNER: {OWNER_ID}",
+                callback_data="admin_user_noop"
+            )
+        ])
+
+    for i, row in enumerate(rows, start=1):
+        kb.append([
+            InlineKeyboardButton(
+                text=f"{i}. {row.user_id}",
+                callback_data="admin_user_noop"
+            ),
+            InlineKeyboardButton(
+                text="🗑",
+                callback_data=f"admin_user_del_{row.user_id}"
+            )
+        ])
+
+    kb.append([InlineKeyboardButton(text="⬅️ 返回", callback_data="admin_user_menu")])
+
+    await safe_edit(
+        message,
+        "👤 管理员列表" if rows or OWNER_ID else "暂无管理员。",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
 
 
 async def show_kw_list(message):
@@ -913,7 +1112,26 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
     chat_id = selected_group.get(uid)
 
     if action == "help":
-        return await m.answer(params.get("text") or "请直接说你要做什么，例如：添加关键词、修改欢迎词、锁群。")
+        help_text = (
+            "📘 Hướng dẫn nhanh:\n\n"
+            "1. Thêm từ khóa:\n"
+            "- 说：帮我添加关键词 上課\n"
+            "- Hoặc vào: 管理员设置 -> 关键词 -> 添加\n\n"
+            "2. Đổi tên nhóm:\n"
+            "- 说：đổi tên nhóm thành E88\n"
+            "- Hoặc: 改群名为 E88\n\n"
+            "3. Khóa / mở nhóm:\n"
+            "- 说：锁群\n"
+            "- 说：开群\n\n"
+            "4. Welcome text:\n"
+            "- Dùng biến: (*name*), (*group*), (*groupid*), (*rand*)\n\n"
+            "5. Cấp quyền admin:\n"
+            "- Dùng nút: 管理员设置 -> 管理员权限\n"
+            "- Chỉ OWNER mới dùng được\n\n"
+            "6. Thoát AI 管家:\n"
+            "- /cancel"
+        )
+        return await m.answer(params.get("text") or help_text)
 
     if action == "show_groups":
         groups = await get_all_groups()
@@ -951,7 +1169,7 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
 
     if action == "unlock_group":
         if not chat_id:
-            return await m.answer("🔓 请先选择群组。") if False else await m.answer("请先选择群组。")
+            return await m.answer("请先选择群组。")
         await unlock_group(chat_id)
         return await m.answer("🔓 已开群。")
 
@@ -1157,6 +1375,7 @@ async def ai_cmd(m: types.Message):
     if not m.from_user or not is_allowed_user(m.from_user.id):
         return
     uid = m.from_user.id
+    reset(uid)
     user_state[uid] = "ai_prompt"
     temp[uid] = {}
     await m.answer(t(uid, "ai_prompt"))
@@ -1235,6 +1454,62 @@ async def admin_menu(c: types.CallbackQuery):
     await safe_edit(c.message, "👑 管理员设置", reply_markup=admin_menu_kb())
 
 
+@dp.callback_query(F.data == "admin_user_menu")
+async def admin_user_menu(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    if c.from_user.id != OWNER_ID:
+        return await c.message.answer("❌ 只有 OWNER 可以管理管理员。")
+    await safe_edit(c.message, "👤 管理员权限", reply_markup=admin_user_menu_kb())
+
+
+@dp.callback_query(F.data == "admin_user_add")
+async def admin_user_add(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    if c.from_user.id != OWNER_ID:
+        return await c.message.answer("❌ 只有 OWNER 可以添加管理员。")
+
+    uid = c.from_user.id
+    reset(uid)
+    user_state[uid] = "admin_add_id"
+    temp[uid] = {}
+    await c.message.answer("请输入要添加的管理员 user_id：")
+
+
+@dp.callback_query(F.data == "admin_user_list")
+async def admin_user_list(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    if c.from_user.id != OWNER_ID:
+        return await c.message.answer("❌ 只有 OWNER 可以查看管理员。")
+    await show_admin_user_list(c.message)
+
+
+@dp.callback_query(F.data.startswith("admin_user_del_"))
+async def admin_user_del(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    if c.from_user.id != OWNER_ID:
+        return await c.message.answer("❌ 只有 OWNER 可以删除管理员。")
+
+    user_id = int(c.data.split("_")[-1])
+    if user_id == OWNER_ID:
+        return await c.message.answer("不能删除 OWNER。")
+
+    async with SessionLocal() as db:
+        await db.execute(delete(AdminUser).where(AdminUser.user_id == user_id))
+        await db.commit()
+
+    await load_admin_cache()
+    await show_admin_user_list(c.message)
+
+
+@dp.callback_query(F.data == "admin_user_noop")
+async def admin_user_noop(c: types.CallbackQuery):
+    await ack(c)
+
+
 @dp.callback_query(F.data == "group_menu")
 async def group_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
@@ -1254,6 +1529,7 @@ async def ai_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "ai_prompt"
     temp[uid] = {}
     await c.message.answer(t(uid, "ai_prompt"))
@@ -1267,17 +1543,21 @@ async def ai_agent_menu(c: types.CallbackQuery):
         return await c.message.answer("AI 管家未开启。")
 
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "ai_agent"
     temp[uid] = {}
+
     await c.message.answer(
         "🧠 AI管家已开启。\n"
-        "你可以直接输入要求，例如：\n"
+        "我可以帮助你了解如何使用机器人，或执行部分管理操作。\n\n"
+        "例如：\n"
         "- 帮我添加关键词 上課\n"
-        "- 把当前群改名为 xxx\n"
+        "- 把当前群改名为 E88\n"
         "- 设置欢迎词为 ...\n"
         "- 锁群\n"
         "- 开群\n"
-        "- 如何添加关键词？\n\n"
+        "- 如何使用欢迎功能？\n\n"
+        "⚠️ 管理员权限请使用按钮菜单：管理员设置 -> 管理员权限\n"
         "输入 /cancel 退出。"
     )
 
@@ -1346,6 +1626,8 @@ async def group_rename(c: types.CallbackQuery):
     chat_id = selected_group.get(uid)
     if not chat_id:
         return await c.message.answer("请先选择群组。")
+
+    reset(uid)
     user_state[uid] = "group_rename"
     temp[uid] = {"chat_id": chat_id}
     await c.message.answer("请输入新的群名：")
@@ -1413,6 +1695,7 @@ async def kw_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "kw_add_key"
     temp[uid] = {}
     await c.message.answer(
@@ -1469,6 +1752,7 @@ async def kw_key(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "kw_edit_key"
     temp[uid] = {"id": kid}
     await c.message.answer("请输入新的关键词：")
@@ -1480,6 +1764,7 @@ async def kw_text(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "kw_edit_text"
     temp[uid] = {"id": kid}
     await c.message.answer("请输入回复文本：")
@@ -1491,6 +1776,7 @@ async def kw_img(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "kw_edit_image"
     temp[uid] = {"id": kid}
     await c.message.answer("请发送图片，或输入图片 URL / file_id：")
@@ -1502,6 +1788,7 @@ async def kw_btn(c: types.CallbackQuery):
         return
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "kw_edit_button"
     temp[uid] = {"id": kid}
     await c.message.answer(
@@ -1551,6 +1838,7 @@ async def wl_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "wl_add_chat"
     temp[uid] = {}
     await c.message.answer("请输入群组 chat_id：")
@@ -1590,6 +1878,7 @@ async def wl_text(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "wl_edit_text"
     temp[uid] = {"id": wid}
     await c.message.answer(
@@ -1615,6 +1904,7 @@ async def wl_img(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "wl_edit_image"
     temp[uid] = {"id": wid}
     await c.message.answer("请发送图片，或输入图片 URL / file_id：")
@@ -1626,6 +1916,7 @@ async def wl_btn(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "wl_edit_button"
     temp[uid] = {"id": wid}
     await c.message.answer(
@@ -1642,6 +1933,7 @@ async def wl_delmin(c: types.CallbackQuery):
         return
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "wl_edit_delete_after"
     temp[uid] = {"id": wid}
     await c.message.answer("请输入删除消息的分钟数（0 = 不删除）：")
@@ -1713,6 +2005,7 @@ async def auto_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_add_chat"
     temp[uid] = {}
     await c.message.answer("请输入要创建定时发送的 chat_id：")
@@ -1766,6 +2059,7 @@ async def auto_text(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_text"
     temp[uid] = {"id": pid}
     await c.message.answer("请输入文本内容：")
@@ -1777,6 +2071,7 @@ async def auto_img(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_image"
     temp[uid] = {"id": pid}
     await c.message.answer("请发送图片，或输入图片 URL / file_id：")
@@ -1788,6 +2083,7 @@ async def auto_btn(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_button"
     temp[uid] = {"id": pid}
     await c.message.answer(
@@ -1803,6 +2099,7 @@ async def auto_chat(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_chat"
     temp[uid] = {"id": pid}
     await c.message.answer("请输入新的 chat_id：")
@@ -1814,6 +2111,7 @@ async def auto_int(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_interval"
     temp[uid] = {"id": pid}
     await c.message.answer("请输入重复间隔（分钟）：")
@@ -1825,6 +2123,7 @@ async def auto_start(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_start"
     temp[uid] = {"id": pid}
     await c.message.answer("请输入开始时间：YYYY-MM-DD HH:MM")
@@ -1836,6 +2135,7 @@ async def auto_end(c: types.CallbackQuery):
         return
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "auto_edit_end"
     temp[uid] = {"id": pid}
     await c.message.answer("请输入结束时间：YYYY-MM-DD HH:MM")
@@ -1881,6 +2181,7 @@ async def ban_add(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     uid = c.from_user.id
+    reset(uid)
     user_state[uid] = "ban_add"
     temp[uid] = {}
     await c.message.answer("请输入禁词，每行一个：")
@@ -1948,7 +2249,6 @@ async def auto_rename_from_form(m: types.Message):
         return await m.answer("❌ 只有群管理员可以提交担保表单。")
 
     data = parse_guarantee_form(m.text)
-
     required = ["组别", "名字", "编号", "规则"]
     missing = [x for x in required if not data.get(x)]
     if missing:
@@ -2059,34 +2359,10 @@ async def admin_dashboard(request: Request, key: str = ""):
 
     now_str = datetime.now().strftime("%H:%M")
     recent_logs = [
-        {
-            "time": now_str,
-            "user": "system",
-            "action": "Webhook initialized",
-            "status": "Ready",
-            "badge_class": "bg-success",
-        },
-        {
-            "time": now_str,
-            "user": "system",
-            "action": "Database schema loaded",
-            "status": "OK",
-            "badge_class": "bg-primary",
-        },
-        {
-            "time": now_str,
-            "user": "system",
-            "action": "Admin cache loaded",
-            "status": "OK",
-            "badge_class": "bg-success",
-        },
-        {
-            "time": now_str,
-            "user": "system",
-            "action": f"Welcome rules: {len(welcomes)}",
-            "status": "Live",
-            "badge_class": "bg-warning text-dark",
-        },
+        {"time": now_str, "user": "system", "action": "Webhook initialized", "status": "Ready", "badge_class": "bg-success"},
+        {"time": now_str, "user": "system", "action": "Database schema loaded", "status": "OK", "badge_class": "bg-primary"},
+        {"time": now_str, "user": "system", "action": "Admin cache loaded", "status": "OK", "badge_class": "bg-success"},
+        {"time": now_str, "user": "system", "action": f"Welcome rules: {len(welcomes)}", "status": "Live", "badge_class": "bg-warning text-dark"},
     ]
 
     system_info = [
@@ -2320,12 +2596,16 @@ async def all_messages(m: types.Message):
             return await m.answer("请输入你的要求。")
 
         result = await ai_agent_parse(user_text)
-
-        if result.get("need_more"):
-            return await m.answer(result.get("question") or "请补充更多信息。")
-
         action = result.get("action", "help")
         params = result.get("params", {}) or {}
+
+        if result.get("need_more"):
+            temp[uid] = {
+                "pending_ai_action": action,
+                "pending_ai_params": params
+            }
+            user_state[uid] = "ai_agent_wait_more"
+            return await m.answer(result.get("question") or "请补充更多信息。")
 
         if action == "help":
             reply = result.get("reply") or "请直接说你要做什么。"
@@ -2345,6 +2625,41 @@ async def all_messages(m: types.Message):
 
         return await execute_ai_action(m, uid, action, params)
 
+    if is_admin_user and state == "ai_agent_wait_more":
+        answer_text = (m.text or m.caption or "").strip()
+        if not answer_text:
+            return await m.answer("请继续输入。")
+
+        action = temp.get(uid, {}).get("pending_ai_action")
+        params = temp.get(uid, {}).get("pending_ai_params", {}) or {}
+
+        if action == "rename_group":
+            params["title"] = answer_text
+        elif action == "add_keyword":
+            params["key"] = answer_text
+        elif action == "set_welcome_text":
+            params["text"] = answer_text
+        elif action == "set_welcome_button":
+            params["button"] = answer_text
+        else:
+            params["text"] = answer_text
+
+        if AI_AGENT_CONFIRM_REQUIRED and action in ("rename_group", "lock_group", "unlock_group"):
+            temp[uid] = {
+                "pending_ai_action": action,
+                "pending_ai_params": params
+            }
+            user_state[uid] = "ai_agent_confirm"
+            return await m.answer(
+                f"⚠️ 即将执行操作：{action}\n"
+                f"参数：{params}\n\n"
+                f"请输入 确认 执行，或 /cancel 取消。"
+            )
+
+        user_state[uid] = "ai_agent"
+        temp[uid] = {}
+        return await execute_ai_action(m, uid, action, params)
+
     if is_admin_user and state == "ai_agent_confirm":
         text_in = (m.text or "").strip()
         if text_in not in ("确认", "confirm", "yes", "ok"):
@@ -2356,6 +2671,43 @@ async def all_messages(m: types.Message):
         user_state[uid] = "ai_agent"
         temp[uid] = {}
         return await execute_ai_action(m, uid, action, params)
+
+    # ---- ADMIN ADD ID ----
+    if is_admin_user and state == "admin_add_id":
+        if uid != OWNER_ID:
+            reset(uid)
+            return await m.answer("❌ 只有 OWNER 可以添加管理员。")
+
+        raw = (m.text or "").strip()
+        user_id = extract_first_int(raw)
+
+        if not user_id:
+            return await m.answer("请输入有效的 user_id。")
+
+        if user_id == OWNER_ID:
+            return await m.answer("不能添加 OWNER。")
+
+        async with SessionLocal() as db:
+            exists = (await db.execute(
+                select(AdminUser).where(AdminUser.user_id == user_id)
+            )).scalars().first()
+
+            if exists:
+                reset(uid)
+                await m.answer(f"该用户已是管理员：{user_id}")
+                return await show_admin_user_list(m)
+
+            db.add(AdminUser(
+                user_id=user_id,
+                note="added_from_bot_menu",
+                created_at=int(time.time())
+            ))
+            await db.commit()
+
+        await load_admin_cache()
+        reset(uid)
+        await m.answer(f"✅ 已添加管理员：{user_id}")
+        return await show_admin_user_list(m)
 
     # ---- KEYWORD ----
     if is_admin_user and state == "kw_add_key":
@@ -2724,7 +3076,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("结束时间已更新。", reply_markup=start_menu_kb(uid))
 
-    # ---- BANNED WORDS CHECK FOR ALL GROUP USERS ----
+    # ---- BANNED WORDS CHECK FOR ALL USERS ----
     if m.chat.type in ("group", "supergroup") and text_ and not text_.startswith("/"):
         async with SessionLocal() as db:
             banned_rows = (await db.execute(select(BannedWord))).scalars().all()
@@ -2979,6 +3331,5 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)

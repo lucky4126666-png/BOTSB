@@ -1,7 +1,6 @@
 fastapi
-uvicorn
-aiogram
-sqlalchemy
+uvicorn[standard]
+aiogram>=3.4.1
+sqlalchemy>=2.0
 asyncpg
-apscheduler
 python-dotenv

@@ -1,1 +1,41 @@
+html
+{% extends "base.html" %}
 
+{% block title %}Groups{% endblock %}
+{% block page_title %}Groups{% endblock %}
+{% block page_subtitle %}Danh sách group đã theo dõi{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Group List</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Chat ID</th>
+          <th>Title</th>
+          <th>Type</th>
+          <th>Admin</th>
+          <th>Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for g in groups %}
+        <tr>
+          <td>{{ g.id }}</td>
+          <td>{{ g.chat_id }}</td>
+          <td>{{ g.title }}</td>
+          <td>{{ g.type }}</td>
+          <td>{{ "✅" if g.is_admin else "❌" }}</td>
+          <td>{{ g.updated_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

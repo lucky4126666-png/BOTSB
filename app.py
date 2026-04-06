@@ -1,9 +1,7 @@
 import os
 import time
-import ssl
 import asyncio
 import contextlib
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
@@ -18,13 +16,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ======================
-# ENV
-# ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
-DB_SSL = os.getenv("DB_SSL", "true").lower() in ("1", "true", "yes", "on")
 
 if not BOT_TOKEN or not BASE_URL or not DATABASE_URL:
     raise RuntimeError("Thiếu BOT_TOKEN / BASE_URL / DATABASE_URL trong file .env")
@@ -32,49 +26,18 @@ if not BOT_TOKEN or not BASE_URL or not DATABASE_URL:
 BASE_URL = BASE_URL.rstrip("/")
 
 # ======================
-# DB URL NORMALIZE
-# ======================
-def normalize_database_url(url: str) -> str:
-    """
-    - đổi postgres:// hoặc postgresql:// -> postgresql+asyncpg://
-    - loại bỏ sslmode nếu có
-    """
-    url = url.strip()
-
-    if url.startswith("postgres://"):
-        url = "postgresql+asyncpg://" + url[len("postgres://") :]
-    elif url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-
-    # remove sslmode from query if exists
-    parsed = urlsplit(url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.pop("sslmode", None)
-
-    url = urlunsplit((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        urlencode(query),
-        parsed.fragment
-    ))
-    return url
-
-DATABASE_URL = normalize_database_url(DATABASE_URL)
-
-# ======================
-# APP / BOT
+# BOT / APP
 # ======================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-ssl_context = ssl.create_default_context() if DB_SSL else None
-
+# ======================
+# DB
+# ======================
 engine = create_async_engine(
     DATABASE_URL,
-    echo=False,
-    connect_args={"ssl": ssl_context} if DB_SSL else {}
+    echo=False
 )
 
 SessionLocal = async_sessionmaker(
@@ -159,7 +122,7 @@ class AutoPost(Base):
     text = Column(Text)
     image = Column(Text)
     button = Column(Text)
-    interval = Column(Integer, default=10)  # phút
+    interval = Column(Integer, default=10)
     is_active = Column(Integer, default=0)
     pin = Column(Integer, default=0)
 
@@ -315,10 +278,9 @@ async def show_auto_view(message: types.Message, pid: int):
 
 async def ensure_schema():
     async with engine.begin() as conn:
-        # tạo bảng nếu chưa có
         await conn.run_sync(Base.metadata.create_all)
 
-        # thêm cột thiếu nếu bảng cũ
+        # nếu bảng cũ thiếu cột thì tự thêm
         await conn.execute(text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 0"))
         await conn.execute(text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS pin INTEGER DEFAULT 0"))
         await conn.execute(text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS interval INTEGER DEFAULT 10"))
@@ -815,4 +777,3 @@ async def shutdown():
         await bot.delete_webhook()
 
     await bot.session.close()
-

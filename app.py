@@ -4,6 +4,7 @@ import json
 import random
 import asyncio
 import contextlib
+import traceback
 from html import escape
 from datetime import datetime
 from typing import Optional, Union
@@ -25,7 +26,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Text, select, delete
+from sqlalchemy import Column, Integer, String, Text, select, delete, text
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -40,6 +41,12 @@ if not BOT_TOKEN or not BASE_URL or not DATABASE_URL:
     raise RuntimeError("缺少 BOT_TOKEN / BASE_URL / DATABASE_URL")
 
 BASE_URL = BASE_URL.rstrip("/")
+
+# Chuẩn hóa URL DB cho SQLAlchemy async
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 ADMIN_IDS = {
@@ -104,9 +111,31 @@ def _jinja_url_for(context, name: str, **path_params):
 templates.env.globals["url_for"] = _jinja_url_for
 templates.env.globals["get_flashed_messages"] = lambda *args, **kwargs: []
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    connect_args={"timeout": 20},
+)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
+
+
+async def wait_for_db(max_retries: int = 8, delay: int = 3):
+    last_error = None
+    for i in range(max_retries):
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("SELECT 1"))
+            print("[DB] connected")
+            return
+        except Exception as e:
+            last_error = e
+            print(f"[DB] connect failed ({i + 1}/{max_retries}): {e}")
+            await asyncio.sleep(delay)
+    raise last_error
+
 
 worker_task = None
 
@@ -116,6 +145,10 @@ selected_group = {}
 selected_lang = {}
 private_menu_msg = {}
 admin_cache = set()
+
+# cache để giảm lag
+keyword_cache = []
+banned_cache = []
 
 STRANGER_TEXT = (
     '点击此处可以<a href="https://t.me/nnnnzubot?startgroup=true">添加机器人进群</a>\n\n'
@@ -640,6 +673,15 @@ def parse_local_ai_agent_request(text: str):
     return None
 
 
+def strip_code_fences(text_: str) -> str:
+    s = (text_ or "").strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s.startswith("json"):
+            s = s[4:]
+    return s.strip()
+
+
 async def ai_agent_parse(user_text: str):
     local_result = parse_local_ai_agent_request(user_text)
     if local_result:
@@ -664,7 +706,7 @@ async def ai_agent_parse(user_text: str):
             ],
             temperature=0.2
         )
-        content = (resp.choices[0].message.content or "").strip()
+        content = strip_code_fences(resp.choices[0].message.content or "")
         data = json.loads(content)
         if not isinstance(data, dict):
             raise ValueError("invalid json")
@@ -861,7 +903,7 @@ def ban_menu_kb():
 
 
 # ======================
-# DB / VIEW HELPERS
+# DB / CACHE HELPERS
 # ======================
 
 async def load_admin_cache():
@@ -869,6 +911,24 @@ async def load_admin_cache():
     async with SessionLocal() as db:
         rows = (await db.execute(select(AdminUser))).scalars().all()
     admin_cache = {r.user_id for r in rows}
+
+
+async def reload_keyword_cache():
+    global keyword_cache
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(Keyword).where(Keyword.active == 1).order_by(Keyword.id.desc())
+        )).scalars().all()
+    keyword_cache = rows
+
+
+async def reload_banned_cache():
+    global banned_cache
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(BannedWord).order_by(BannedWord.id.asc())
+        )).scalars().all()
+    banned_cache = rows
 
 
 async def get_admin_groups():
@@ -1137,11 +1197,11 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
         groups = await get_all_groups()
         if not groups:
             return await m.answer("暂无群组。")
-        text = "群组列表：\n\n" + "\n".join(
+        text_out = "群组列表：\n\n" + "\n".join(
             f"{i}. {g.title or g.chat_id} ({g.chat_id})"
             for i, g in enumerate(groups, start=1)
         )
-        return await m.answer(text)
+        return await m.answer(text_out)
 
     if action == "list_keywords":
         return await show_kw_list(m)
@@ -1187,6 +1247,7 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
             await db.commit()
             await db.refresh(row)
 
+        await reload_keyword_cache()
         return await m.answer(f"✅ 已添加关键词：{key}")
 
     if action == "set_welcome_text":
@@ -1200,11 +1261,9 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
             row = (await db.execute(
                 select(WelcomeSetting).where(WelcomeSetting.chat_id == str(chat_id))
             )).scalars().first()
-
             if not row:
                 row = WelcomeSetting(chat_id=str(chat_id), active=1)
                 db.add(row)
-
             row.text = text_value
             await db.commit()
 
@@ -1221,11 +1280,9 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
             row = (await db.execute(
                 select(WelcomeSetting).where(WelcomeSetting.chat_id == str(chat_id))
             )).scalars().first()
-
             if not row:
                 row = WelcomeSetting(chat_id=str(chat_id), active=1)
                 db.add(row)
-
             row.button = button_value
             await db.commit()
 
@@ -1240,11 +1297,9 @@ async def execute_ai_action(m: types.Message, uid: int, action: str, params: dic
             row = (await db.execute(
                 select(WelcomeSetting).where(WelcomeSetting.chat_id == str(chat_id))
             )).scalars().first()
-
             if not row:
                 row = WelcomeSetting(chat_id=str(chat_id), active=1)
                 db.add(row)
-
             row.active = 1 if enabled in (True, 1, "1", "true", "on", "开启") else 0
             await db.commit()
 
@@ -1363,11 +1418,12 @@ async def start(m: types.Message):
     if is_allowed_user(uid):
         await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
 
+
 @dp.message(Command("ping"))
 async def ping_cmd(m: types.Message):
     print("[PING RECEIVED]", m.from_user.id if m.from_user else None, m.chat.id)
     await m.answer("pong")
-        
+
 
 @dp.message(F.text == "/cancel")
 async def cancel(m: types.Message):
@@ -1737,6 +1793,7 @@ async def kw_toggle(c: types.CallbackQuery):
             return await c.message.answer("未找到关键词。")
         k.active = 0 if k.active else 1
         await db.commit()
+    await reload_keyword_cache()
     await show_kw_view(c.message, kid)
 
 
@@ -1751,6 +1808,7 @@ async def kw_mode(c: types.CallbackQuery):
             return await c.message.answer("未找到关键词。")
         k.mode = "contains" if k.mode == "exact" else "exact"
         await db.commit()
+    await reload_keyword_cache()
     await show_kw_view(c.message, kid)
 
 
@@ -1827,6 +1885,7 @@ async def kw_del(c: types.CallbackQuery):
     async with SessionLocal() as db:
         await db.execute(delete(Keyword).where(Keyword.id == kid))
         await db.commit()
+    await reload_keyword_cache()
     await show_kw_list(c.message)
 
 
@@ -2210,6 +2269,7 @@ async def ban_del(c: types.CallbackQuery):
     async with SessionLocal() as db:
         await db.execute(delete(BannedWord).where(BannedWord.id == bid))
         await db.commit()
+    await reload_banned_cache()
     await show_banned_list(c.message)
 
 
@@ -2335,34 +2395,10 @@ async def admin_dashboard(request: Request, key: str = ""):
     allowed_ids = allowed_admin_ids()
 
     stats = [
-        {
-            "label": "Allowed admins",
-            "value": str(len(allowed_ids)),
-            "note": "OWNER + ENV + DB",
-            "icon": "bi-people-fill",
-            "color": "primary",
-        },
-        {
-            "label": "Groups",
-            "value": str(len(groups)),
-            "note": "Tracked groups",
-            "icon": "bi-collection",
-            "color": "success",
-        },
-        {
-            "label": "Keywords",
-            "value": str(len(keywords)),
-            "note": "Auto reply rules",
-            "icon": "bi-lightning-charge-fill",
-            "color": "warning",
-        },
-        {
-            "label": "Auto posts",
-            "value": str(len(autos)),
-            "note": "Scheduled tasks",
-            "icon": "bi-calendar2-check-fill",
-            "color": "danger",
-        },
+        {"label": "Allowed admins", "value": str(len(allowed_ids)), "note": "OWNER + ENV + DB", "icon": "bi-people-fill", "color": "primary"},
+        {"label": "Groups", "value": str(len(groups)), "note": "Tracked groups", "icon": "bi-collection", "color": "success"},
+        {"label": "Keywords", "value": str(len(keywords)), "note": "Auto reply rules", "icon": "bi-lightning-charge-fill", "color": "warning"},
+        {"label": "Auto posts", "value": str(len(autos)), "note": "Scheduled tasks", "icon": "bi-calendar2-check-fill", "color": "danger"},
     ]
 
     now_str = datetime.now().strftime("%H:%M")
@@ -2559,7 +2595,8 @@ async def all_messages(m: types.Message):
             return await m.answer("已取消操作。", reply_markup=start_menu_kb(uid))
         return
 
-    print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
+    if state or (m.text and m.text.startswith("/")):
+        print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
 
     # ---- AI ----
     if is_admin_user and state == "ai_prompt":
@@ -2740,6 +2777,7 @@ async def all_messages(m: types.Message):
                     added += 1
                 await db.commit()
 
+            await reload_keyword_cache()
             reset(uid)
             await m.answer(f"已添加 {added} 个关键词。\n已跳过 {existed} 个已存在关键词。")
             return await show_kw_list(m)
@@ -2755,6 +2793,7 @@ async def all_messages(m: types.Message):
             await db.commit()
             await db.refresh(row)
 
+        await reload_keyword_cache()
         user_state[uid] = "kw_add_text"
         temp[uid] = {"id": row.id}
         return await m.answer("已保存关键词。\n请输入回复文本，若跳过请输入 skip")
@@ -2773,6 +2812,7 @@ async def all_messages(m: types.Message):
                 k.text = value
                 await db.commit()
 
+        await reload_keyword_cache()
         user_state[uid] = "kw_add_image"
         temp[uid] = {"id": kid}
         return await m.answer("请发送图片，或输入图片 URL / file_id。\n若跳过请输入 skip")
@@ -2794,6 +2834,7 @@ async def all_messages(m: types.Message):
                 k.image = image
                 await db.commit()
 
+        await reload_keyword_cache()
         user_state[uid] = "kw_add_button"
         temp[uid] = {"id": kid}
         return await m.answer(
@@ -2817,6 +2858,7 @@ async def all_messages(m: types.Message):
                 k.button = value
                 await db.commit()
 
+        await reload_keyword_cache()
         reset(uid)
         await m.answer("关键词创建完成。")
         return await show_kw_view(m, kid)
@@ -2839,6 +2881,7 @@ async def all_messages(m: types.Message):
                 k.key = key
                 await db.commit()
 
+        await reload_keyword_cache()
         reset(uid)
         await m.answer("关键词已更新。")
         return await show_kw_view(m, kid)
@@ -2850,6 +2893,7 @@ async def all_messages(m: types.Message):
             if k:
                 k.text = m.text or ""
                 await db.commit()
+        await reload_keyword_cache()
         reset(uid)
         await m.answer("文本已更新。")
         return await show_kw_view(m, kid)
@@ -2864,6 +2908,7 @@ async def all_messages(m: types.Message):
             if k:
                 k.image = image
                 await db.commit()
+        await reload_keyword_cache()
         reset(uid)
         await m.answer("媒体已更新。")
         return await show_kw_view(m, kid)
@@ -2875,6 +2920,7 @@ async def all_messages(m: types.Message):
             if k:
                 k.button = m.text or ""
                 await db.commit()
+        await reload_keyword_cache()
         reset(uid)
         await m.answer("按钮已更新。")
         return await show_kw_view(m, kid)
@@ -2899,6 +2945,7 @@ async def all_messages(m: types.Message):
                 added += 1
             await db.commit()
 
+        await reload_banned_cache()
         reset(uid)
         await m.answer(f"已添加 {added} 个禁词，跳过 {existed} 个已存在禁词。")
         return await show_banned_list(m)
@@ -3086,11 +3133,8 @@ async def all_messages(m: types.Message):
 
     # ---- BANNED WORDS CHECK FOR ALL USERS ----
     if m.chat.type in ("group", "supergroup") and text_ and not text_.startswith("/"):
-        async with SessionLocal() as db:
-            banned_rows = (await db.execute(select(BannedWord))).scalars().all()
-
         lower_text = text_.lower()
-        for row in banned_rows:
+        for row in banned_cache:
             word = (row.word or "").strip().lower()
             if word and word in lower_text:
                 with contextlib.suppress(Exception):
@@ -3101,11 +3145,7 @@ async def all_messages(m: types.Message):
     if not text_ or text_.startswith("/"):
         return
 
-    async with SessionLocal() as db:
-        kws = (await db.execute(
-            select(Keyword).where(Keyword.active == 1).order_by(Keyword.id.desc())
-        )).scalars().all()
-
+    kws = keyword_cache
     if not kws:
         return
 
@@ -3126,7 +3166,6 @@ async def all_messages(m: types.Message):
             break
 
     if matched:
-        print(f"[KW MATCH] {matched.key}")
         await send_preview(
             chat_id=m.chat.id,
             text=matched.text,
@@ -3264,21 +3303,21 @@ async def health():
 async def webhook(req: Request):
     try:
         data = await req.json()
-        print("[WEBHOOK RAW]", data)
-
         update = types.Update.model_validate(data)
-        print("[WEBHOOK PARSED]", update.model_dump())
+
+        print("[WEBHOOK]", {
+            "update_id": data.get("update_id"),
+            "has_message": "message" in data,
+            "has_callback": "callback_query" in data,
+            "has_my_chat_member": "my_chat_member" in data,
+        })
 
         await dp.feed_update(bot, update)
-        print("[WEBHOOK OK]")
         return {"ok": True}
 
     except Exception as e:
         print("[WEBHOOK ERROR]", repr(e))
-        return {"ok": False, "error": str(e)}
-
-    except Exception as e:
-        print("[WEBHOOK ERROR]", repr(e))
+        traceback.print_exc()
         return {"ok": False, "error": str(e)}
 
 
@@ -3291,15 +3330,35 @@ async def ensure_schema():
 async def startup():
     global worker_task
 
-    await ensure_schema()
-    await load_admin_cache()
-    worker_task = asyncio.create_task(auto_worker())
-
-    webhook_url = f"{BASE_URL}/webhook"
-    print("[STARTUP] BASE_URL =", BASE_URL)
-    print("[STARTUP] webhook_url =", webhook_url)
+    print("[STARTUP] begin")
 
     try:
+        print("[STARTUP] wait_for_db...")
+        await wait_for_db()
+        print("[STARTUP] wait_for_db OK")
+
+        print("[STARTUP] ensure_schema...")
+        await ensure_schema()
+        print("[STARTUP] ensure_schema OK")
+
+        print("[STARTUP] load_admin_cache...")
+        await load_admin_cache()
+        print("[STARTUP] load_admin_cache OK")
+
+        print("[STARTUP] reload_keyword_cache...")
+        await reload_keyword_cache()
+        print("[STARTUP] reload_keyword_cache OK")
+
+        print("[STARTUP] reload_banned_cache...")
+        await reload_banned_cache()
+        print("[STARTUP] reload_banned_cache OK")
+
+        worker_task = asyncio.create_task(auto_worker())
+
+        webhook_url = f"{BASE_URL}/webhook"
+        print("[STARTUP] BASE_URL =", BASE_URL)
+        print("[STARTUP] webhook_url =", webhook_url)
+
         await bot.delete_webhook(drop_pending_updates=True)
         print("[STARTUP] old webhook deleted")
 
@@ -3311,19 +3370,16 @@ async def startup():
         print("[STARTUP] set_webhook result =", result)
 
         info = await bot.get_webhook_info()
-        print("[STARTUP] webhook info =", info.model_dump())
         print("[WEBHOOK INFO URL]", info.url)
         print("[WEBHOOK INFO PENDING]", info.pending_update_count)
         print("[WEBHOOK INFO LAST ERROR]", info.last_error_message)
 
-        if not info.url:
-            print("[ERROR] Webhook chưa được set. Hãy kiểm tra BASE_URL hoặc URL HTTPS public.")
+        print("READY")
 
     except Exception as e:
-        print("[STARTUP ERROR] set webhook failed:", e)
+        print("[STARTUP ERROR]", repr(e))
+        traceback.print_exc()
         raise
-
-    print("READY")
 
 
 @app.on_event("shutdown")

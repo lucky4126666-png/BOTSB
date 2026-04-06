@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Text, select, delete, text as sql_text
+from sqlalchemy import Column, Integer, String, Text, select, delete
 
 from dotenv import load_dotenv
 
@@ -39,6 +39,8 @@ last_sent = {}
 
 user_state = {}
 temp = {}
+selected_group = {}
+selected_lang = {}
 
 def reset(uid):
     user_state.pop(uid, None)
@@ -46,13 +48,11 @@ def reset(uid):
 
 # ======================
 # BUTTON PARSER
-# Format:
-# Nút - https://url.com && Nút 2 - https://url2.com
-# dòng mới = hàng mới
 # ======================
 def parse_buttons(text):
     if not text:
         return None
+
     rows = []
     for line in text.split("\n"):
         row = []
@@ -69,6 +69,7 @@ def parse_buttons(text):
             row.append({"text": t.strip(), "url": u.strip()})
         if row:
             rows.append(row)
+
     return rows or None
 
 def build_buttons(data):
@@ -80,6 +81,48 @@ def build_buttons(data):
             for row in data
         ]
     )
+
+async def safe_edit(message: types.Message, text_: str, reply_markup=None):
+    try:
+        return await message.edit_text(text_, reply_markup=reply_markup)
+    except TelegramBadRequest:
+        return await message.answer(text_, reply_markup=reply_markup)
+    except Exception:
+        return await message.answer(text_, reply_markup=reply_markup)
+
+async def send_preview(chat_id, text=None, image=None, button=None):
+    kb = build_buttons(parse_buttons(button))
+    try:
+        if image:
+            return await bot.send_photo(
+                chat_id=chat_id,
+                photo=image,
+                caption=text or "",
+                reply_markup=kb
+            )
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=text or " ",
+            reply_markup=kb
+        )
+    except Exception as e:
+        print(f"[SEND_PREVIEW ERROR] chat_id={chat_id} error={e}")
+        raise
+
+def extract_image_from_message(m: types.Message):
+    if m.photo:
+        return m.photo[-1].file_id
+    if m.text:
+        return m.text.strip()
+    return None
+
+def parse_dt(s: str):
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
 
 # ======================
 # MODELS
@@ -119,19 +162,8 @@ class AutoPost(Base):
     end_at = Column(Text, default="")
     last_sent_ts = Column(Integer, default=0)
 
-# ======================
-# SELECTED DATA
-# ======================
-selected_group = {}
-selected_lang = {}
-
-# ======================
-# MODEL: BOT GROUPS
-# ======================
-
 class BotGroup(Base):
     __tablename__ = "bot_groups"
-
     id = Column(Integer, primary_key=True)
     chat_id = Column(String, unique=True, index=True)
     title = Column(String, default="")
@@ -140,7 +172,7 @@ class BotGroup(Base):
     updated_at = Column(Integer, default=0)
 
 # ======================
-# START MENUS
+# MENUS
 # ======================
 def start_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -185,6 +217,27 @@ def group_select_kb(groups):
     kb.append([InlineKeyboardButton(text="⬅️ Trở lại", callback_data="back_start")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+def kw_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Thêm", callback_data="kw_add")],
+        [InlineKeyboardButton(text="📋 Danh sách", callback_data="kw_list")],
+        [InlineKeyboardButton(text="🔙 Home", callback_data="back_start")],
+    ])
+
+def wl_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Tạo", callback_data="wl_add")],
+        [InlineKeyboardButton(text="📋 Danh sách", callback_data="wl_list")],
+        [InlineKeyboardButton(text="🔙 Home", callback_data="back_start")],
+    ])
+
+def auto_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Tạo", callback_data="auto_add")],
+        [InlineKeyboardButton(text="📋 Danh sách", callback_data="auto_list")],
+        [InlineKeyboardButton(text="🔙 Home", callback_data="back_start")],
+    ])
+
 # ======================
 # HELPERS
 # ======================
@@ -202,279 +255,6 @@ async def get_all_groups():
         )).scalars().all()
     return groups
 
-# ======================
-# TRACK BOT IN GROUP
-# ======================
-@dp.my_chat_member()
-async def track_bot_membership(event: types.ChatMemberUpdated):
-    chat = event.chat
-    new_status = event.new_chat_member.status
-
-    if chat.type not in ("group", "supergroup"):
-        return
-
-    chat_id = str(chat.id)
-    now_ts = int(time.time())
-
-    # Bot được thêm vào nhóm / lên admin
-    if new_status in ("member", "administrator"):
-        async with SessionLocal() as db:
-            row = (await db.execute(
-                select(BotGroup).where(BotGroup.chat_id == chat_id)
-            )).scalars().first()
-
-            if not row:
-                row = BotGroup(
-                    chat_id=chat_id,
-                    title=chat.title or "",
-                    type=chat.type,
-                    is_admin=1 if new_status == "administrator" else 0,
-                    updated_at=now_ts
-                )
-                db.add(row)
-            else:
-                row.title = chat.title or row.title
-                row.type = chat.type
-                row.is_admin = 1 if new_status == "administrator" else 0
-                row.updated_at = now_ts
-
-            await db.commit()
-
-    # Bot rời nhóm / bị kick
-    if new_status in ("left", "kicked"):
-        async with SessionLocal() as db:
-            await db.execute(delete(BotGroup).where(BotGroup.chat_id == chat_id))
-            await db.commit()
-            # xoá group đã chọn nếu đang chọn đúng group đó
-            for uid, gid in list(selected_group.items()):
-                if gid == chat_id:
-                    selected_group.pop(uid, None)
-
-# ======================
-# /START
-# ======================
-@dp.message(F.text == "/start")
-async def start(m: types.Message):
-    if not m.from_user:
-        return
-
-    reset(m.from_user.id)
-
-    groups = await get_admin_groups()
-
-    # Nếu có nhóm thì hiện danh sách nhóm trước
-    if groups:
-        await m.answer("👥 Chọn nhóm để quản lý:", reply_markup=group_select_kb(groups))
-        return
-
-    # Nếu chưa có nhóm thì vào trang chủ
-    await m.answer("🏠 Trang chủ", reply_markup=start_menu_kb())
-
-@dp.callback_query(F.data == "back_start")
-async def back_start(c: types.CallbackQuery):
-    await c.answer()
-    await safe_edit(c.message, "🏠 Trang chủ", reply_markup=start_menu_kb())
-
-# ======================
-# MAIN MENU
-# ======================
-@dp.callback_query(F.data == "admin_menu")
-async def admin_menu(c: types.CallbackQuery):
-    await c.answer()
-    await safe_edit(c.message, "👑 ADMIN + Cài đặt", reply_markup=admin_menu_kb())
-
-@dp.callback_query(F.data == "group_menu")
-async def group_menu(c: types.CallbackQuery):
-    await c.answer()
-    groups = await get_all_groups()
-
-    if not groups:
-        return await safe_edit(
-            c.message,
-            "👥 NHÓM\n\nChưa có nhóm nào được lưu.",
-            reply_markup=group_menu_kb()
-        )
-
-    await safe_edit(
-        c.message,
-        "👥 NHÓM\n\nChọn nhóm để quản lý.",
-        reply_markup=group_menu_kb()
-    )
-
-@dp.callback_query(F.data == "lang_menu")
-async def lang_menu(c: types.CallbackQuery):
-    await c.answer()
-    await safe_edit(c.message, "🌐 Languages", reply_markup=lang_menu_kb())
-
-@dp.callback_query(F.data == "group_list")
-async def group_list(c: types.CallbackQuery):
-    await c.answer()
-    groups = await get_all_groups()
-
-    kb = []
-    for g in groups:
-        kb.append([
-            InlineKeyboardButton(
-                text=f"{g.title or g.chat_id} ({'ADMIN' if g.is_admin else 'MEMBER'})",
-                callback_data=f"pick_group_{g.chat_id}"
-            )
-        ])
-    kb.append([InlineKeyboardButton(text="⬅️ Trở lại", callback_data="group_menu")])
-
-    await safe_edit(
-        c.message,
-        "📋 Danh sách nhóm",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
-    )
-
-@dp.callback_query(F.data == "group_pick")
-async def group_pick(c: types.CallbackQuery):
-    await c.answer()
-    groups = await get_all_groups()
-
-    if not groups:
-        return await c.message.answer("Chưa có nhóm nào.")
-
-    await safe_edit(
-        c.message,
-        "➕ Chọn nhóm:",
-        reply_markup=group_select_kb(groups)
-    )
-
-@dp.callback_query(F.data.startswith("pick_group_"))
-async def pick_group(c: types.CallbackQuery):
-    await c.answer()
-    chat_id = c.data.replace("pick_group_", "")
-    uid = c.from_user.id
-
-    selected_group[uid] = chat_id
-
-    async with SessionLocal() as db:
-        g = (await db.execute(
-            select(BotGroup).where(BotGroup.chat_id == chat_id)
-        )).scalars().first()
-
-    title = g.title if g and g.title else chat_id
-
-    await safe_edit(
-        c.message,
-        f"✅ Đã chọn nhóm:\n{title}\n\n🏠 Trang chủ",
-        reply_markup=start_menu_kb()
-    )
-
-@dp.callback_query(F.data == "lang_vi")
-async def lang_vi(c: types.CallbackQuery):
-    await c.answer()
-    selected_lang[c.from_user.id] = "vi"
-    await safe_edit(c.message, "✅ Đã chọn: Tiếng Việt", reply_markup=start_menu_kb())
-
-@dp.callback_query(F.data == "lang_en")
-async def lang_en(c: types.CallbackQuery):
-    await c.answer()
-    selected_lang[c.from_user.id] = "en"
-    await safe_edit(c.message, "✅ Selected: English", reply_markup=start_menu_kb())
-def home():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📌 Từ khoá", callback_data="kw_menu")],
-        [InlineKeyboardButton(text="👋 Chào mừng nhóm", callback_data="wl_menu")],
-        [InlineKeyboardButton(text="📅 Auto Post", callback_data="auto_menu")],
-    ])
-
-def kw_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Thêm", callback_data="kw_add")],
-        [InlineKeyboardButton(text="📋 Danh sách", callback_data="kw_list")],
-        [InlineKeyboardButton(text="🔙 Home", callback_data="home")],
-    ])
-
-def wl_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Tạo", callback_data="wl_add")],
-        [InlineKeyboardButton(text="📋 Danh sách", callback_data="wl_list")],
-        [InlineKeyboardButton(text="🔙 Home", callback_data="home")],
-    ])
-
-def auto_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Tạo", callback_data="auto_add")],
-        [InlineKeyboardButton(text="📋 Danh sách", callback_data="auto_list")],
-        [InlineKeyboardButton(text="🔙 Home", callback_data="home")],
-    ])
-
-# ======================
-# HELPERS
-# ======================
-async def safe_edit(message: types.Message, text_: str, reply_markup=None):
-    try:
-        return await message.edit_text(text_, reply_markup=reply_markup)
-    except TelegramBadRequest:
-        return await message.answer(text_, reply_markup=reply_markup)
-    except Exception:
-        return await message.answer(text_, reply_markup=reply_markup)
-
-async def send_preview(chat_id, text=None, image=None, button=None):
-    kb = build_buttons(parse_buttons(button))
-    if image:
-        return await bot.send_photo(
-            chat_id=chat_id,
-            photo=image,
-            caption=text or "",
-            reply_markup=kb
-        )
-    return await bot.send_message(
-        chat_id=chat_id,
-        text=text or " ",
-        reply_markup=kb
-    )
-
-def extract_image_from_message(m: types.Message):
-    if m.photo:
-        return m.photo[-1].file_id
-    if m.text:
-        return m.text.strip()
-    return None
-
-def parse_dt(s: str):
-    if not s:
-        return None
-    try:
-        return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
-    except Exception:
-        return None
-
-# ======================
-# DB INIT
-# ======================
-async def ensure_schema():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-        await conn.execute(sql_text("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'exact'"))
-        await conn.execute(sql_text("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS active INTEGER DEFAULT 1"))
-        await conn.execute(sql_text("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS text TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS image TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE keywords ADD COLUMN IF NOT EXISTS button TEXT DEFAULT ''"))
-
-        await conn.execute(sql_text("ALTER TABLE welcome_settings ADD COLUMN IF NOT EXISTS active INTEGER DEFAULT 0"))
-        await conn.execute(sql_text("ALTER TABLE welcome_settings ADD COLUMN IF NOT EXISTS text TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE welcome_settings ADD COLUMN IF NOT EXISTS image TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE welcome_settings ADD COLUMN IF NOT EXISTS button TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE welcome_settings ADD COLUMN IF NOT EXISTS delete_after INTEGER DEFAULT 0"))
-        await conn.execute(sql_text("ALTER TABLE welcome_settings ADD COLUMN IF NOT EXISTS pin INTEGER DEFAULT 0"))
-
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS active INTEGER DEFAULT 0"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS text TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS image TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS button TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS interval INTEGER DEFAULT 10"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS pin INTEGER DEFAULT 0"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS start_at TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS end_at TEXT DEFAULT ''"))
-        await conn.execute(sql_text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS last_sent_ts INTEGER DEFAULT 0"))
-
-# ======================
-# VIEW FUNCTIONS
-# ======================
 async def show_kw_list(message):
     async with SessionLocal() as db:
         rows = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
@@ -505,8 +285,8 @@ async def show_kw_view(message, kid):
     await safe_edit(
         message,
         f"Chi tiết cài đặt từ khoá\n\n"
-        f"Từ khoá: {k.key}\n\n"
-        f"Chế độ kích hoạt: {'Chính xác' if k.mode == 'exact' else 'Bao gồm'}\n"
+        f"Từ khoá: {k.key}\n"
+        f"Chế độ: {'Chính xác' if k.mode == 'exact' else 'Bao gồm'}\n"
         f"Phản hồi: {'✅' if k.active else '❌'}\n"
         f"Nút: {'✅' if k.button else '❌'}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -552,14 +332,14 @@ async def show_wl_view(message, wid):
         message,
         f"Chào mừng nhóm\n\n"
         f"Trạng thái: {'Mở' if w.active else 'Đóng'}\n"
-        f"Xóa tin nhắn (phút): {w.delete_after if w.delete_after else 'Không'}\n"
-        f"Nội dung chào mừng tùy chỉnh:\n"
-        f"├ Ảnh phương tiện: {'✅' if w.image else '❌'}\n"
-        f"├ Nút liên kết: {'✅' if w.button else '❌'}\n"
-        f"└ Nội dung văn bản: {'✅' if w.text else '❌'}",
+        f"Xóa tin nhắn: {w.delete_after if w.delete_after else 'Không'} phút\n"
+        f"Ảnh: {'✅' if w.image else '❌'}\n"
+        f"Nút: {'✅' if w.button else '❌'}\n"
+        f"Văn bản: {'✅' if w.text else '❌'}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"Trạng thái: {'✅ Mở' if w.active else '❌ Đóng'}", callback_data=f"wl_toggle_{w.id}")],
-            [InlineKeyboardButton(text=f"Xóa tin nhắn... {'✅ là' if w.delete_after else '❌ Không'}", callback_data=f"wl_delmin_{w.id}")],
+            [InlineKeyboardButton(text=f"Xóa tin nhắn: {w.delete_after if w.delete_after else 0} phút", callback_data=f"wl_delmin_{w.id}")],
+            [InlineKeyboardButton(text="📌 Ghim", callback_data=f"wl_pin_{w.id}")],
             [InlineKeyboardButton(text="📝 Sửa đổi văn bản", callback_data=f"wl_text_{w.id}")],
             [InlineKeyboardButton(text="📷 Sửa đổi phương tiện", callback_data=f"wl_img_{w.id}")],
             [InlineKeyboardButton(text="🔤 Nút sửa đổi", callback_data=f"wl_btn_{w.id}")],
@@ -595,27 +375,29 @@ async def show_auto_view(message, pid):
     if not p:
         return await message.answer("Auto post không tồn tại.")
 
+    last_time = "-"
+    if p.last_sent_ts:
+        last_time = datetime.fromtimestamp(p.last_sent_ts).strftime("%Y-%m-%d %H:%M:%S")
+
     await safe_edit(
         message,
         f"Tin nhắn định kỳ\n\n"
         f"Trạng thái: {'✅ Mở' if p.active else '❌ Đóng'}\n"
-        f"Khoảng thời gian lặp lại: {p.interval} phút\n"
-        f"Khoảng thời gian: {p.start_at or '-'}\n"
-        f"Lần chạy tiếp theo: {'-' if not p.last_sent_ts else p.last_sent_ts}\n"
-        f"Ngày bắt đầu: {p.start_at or '-'}\n"
-        f"Ngày kết thúc: {p.end_at or '-'}\n\n"
-        f"Hình ảnh phương tiện: {'✅' if p.image else '❌'}\n"
-        f"Nút liên kết: {'✅' if p.button else '❌'}\n"
-        f"Nội dung văn bản: {'✅' if p.text else '❌'}",
+        f"Khoảng lặp: {p.interval} phút\n"
+        f"Bắt đầu: {p.start_at or '-'}\n"
+        f"Kết thúc: {p.end_at or '-'}\n"
+        f"Lần gửi gần nhất: {last_time}\n\n"
+        f"Ảnh: {'✅' if p.image else '❌'}\n"
+        f"Nút: {'✅' if p.button else '❌'}\n"
+        f"Văn bản: {'✅' if p.text else '❌'}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"Trạng thái: {'✅ Mở' if p.active else '❌ Đóng'}", callback_data=f"auto_toggle_{p.id}")],
-            [InlineKeyboardButton(text=f"📌 Ghim lại: {'✅ Có' if p.pin else '❌ Không'}", callback_data=f"auto_pin_{p.id}")],
+            [InlineKeyboardButton(text=f"📌 Ghim: {'✅ Có' if p.pin else '❌ Không'}", callback_data=f"auto_pin_{p.id}")],
             [InlineKeyboardButton(text="📝 Sửa đổi văn bản", callback_data=f"auto_text_{p.id}")],
             [InlineKeyboardButton(text="📷 Sửa đổi phương tiện", callback_data=f"auto_img_{p.id}")],
             [InlineKeyboardButton(text="🔤 Nút sửa đổi", callback_data=f"auto_btn_{p.id}")],
             [InlineKeyboardButton(text="👀 Thông báo xem trước", callback_data=f"auto_pre_{p.id}")],
             [InlineKeyboardButton(text="⏩ Thời gian giữa các...", callback_data=f"auto_int_{p.id}")],
-            [InlineKeyboardButton(text="🕘 Đặt khoảng thời gian", callback_data=f"auto_time_{p.id}")],
             [InlineKeyboardButton(text="📅 Ngày bắt đầu", callback_data=f"auto_start_{p.id}")],
             [InlineKeyboardButton(text="📅 Ngày kết thúc", callback_data=f"auto_end_{p.id}")],
             [InlineKeyboardButton(text="⬅️ Trở lại", callback_data="auto_list")],
@@ -623,26 +405,154 @@ async def show_auto_view(message, pid):
     )
 
 # ======================
-# START
+# TRACK BOT IN GROUP
+# ======================
+@dp.my_chat_member()
+async def track_bot_membership(event: types.ChatMemberUpdated):
+    chat = event.chat
+    new_status = event.new_chat_member.status
+
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    chat_id = str(chat.id)
+    now_ts = int(time.time())
+
+    if new_status in ("member", "administrator"):
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(BotGroup).where(BotGroup.chat_id == chat_id)
+            )).scalars().first()
+
+            if not row:
+                row = BotGroup(
+                    chat_id=chat_id,
+                    title=chat.title or "",
+                    type=chat.type,
+                    is_admin=1 if new_status == "administrator" else 0,
+                    updated_at=now_ts
+                )
+                db.add(row)
+            else:
+                row.title = chat.title or row.title
+                row.type = chat.type
+                row.is_admin = 1 if new_status == "administrator" else 0
+                row.updated_at = now_ts
+
+            await db.commit()
+
+    if new_status in ("left", "kicked"):
+        async with SessionLocal() as db:
+            await db.execute(delete(BotGroup).where(BotGroup.chat_id == chat_id))
+            await db.commit()
+
+# ======================
+# START / HOME
 # ======================
 @dp.message(F.text == "/start")
 async def start(m: types.Message):
     if not m.from_user:
         return
     reset(m.from_user.id)
-    await m.answer("🏠 Trang chủ", reply_markup=home())
+
+    groups = await get_admin_groups()
+    if groups:
+        await m.answer("👥 Chọn nhóm để quản lý:", reply_markup=group_select_kb(groups))
+        return
+
+    await m.answer("🏠 Trang chủ", reply_markup=start_menu_kb())
 
 @dp.message(F.text == "/cancel")
 async def cancel(m: types.Message):
     if not m.from_user:
         return
     reset(m.from_user.id)
-    await m.answer("Đã huỷ thao tác.", reply_markup=home())
+    await m.answer("Đã huỷ thao tác.", reply_markup=start_menu_kb())
 
-@dp.callback_query(F.data == "home")
-async def go_home(c: types.CallbackQuery):
+@dp.callback_query(F.data == "back_start")
+async def back_start(c: types.CallbackQuery):
     await c.answer()
-    await safe_edit(c.message, "🏠 Trang chủ", reply_markup=home())
+    await safe_edit(c.message, "🏠 Trang chủ", reply_markup=start_menu_kb())
+
+# ======================
+# MAIN MENU
+# ======================
+@dp.callback_query(F.data == "admin_menu")
+async def admin_menu(c: types.CallbackQuery):
+    await c.answer()
+    await safe_edit(c.message, "👑 ADMIN + Cài đặt", reply_markup=admin_menu_kb())
+
+@dp.callback_query(F.data == "group_menu")
+async def group_menu(c: types.CallbackQuery):
+    await c.answer()
+    await safe_edit(c.message, "👥 NHÓM", reply_markup=group_menu_kb())
+
+@dp.callback_query(F.data == "lang_menu")
+async def lang_menu(c: types.CallbackQuery):
+    await c.answer()
+    await safe_edit(c.message, "🌐 Languages", reply_markup=lang_menu_kb())
+
+@dp.callback_query(F.data == "group_list")
+async def group_list(c: types.CallbackQuery):
+    await c.answer()
+    groups = await get_all_groups()
+
+    kb = []
+    for g in groups:
+        kb.append([
+            InlineKeyboardButton(
+                text=f"{g.title or g.chat_id} ({'ADMIN' if g.is_admin else 'MEMBER'})",
+                callback_data=f"pick_group_{g.chat_id}"
+            )
+        ])
+    kb.append([InlineKeyboardButton(text="⬅️ Trở lại", callback_data="group_menu")])
+
+    await safe_edit(
+        c.message,
+        "📋 Danh sách nhóm" if groups else "Chưa có nhóm nào được lưu.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+@dp.callback_query(F.data == "group_pick")
+async def group_pick(c: types.CallbackQuery):
+    await c.answer()
+    groups = await get_all_groups()
+    if not groups:
+        return await c.message.answer("Chưa có nhóm nào.")
+    await safe_edit(c.message, "➕ Chọn nhóm:", reply_markup=group_select_kb(groups))
+
+@dp.callback_query(F.data.startswith("pick_group_"))
+async def pick_group(c: types.CallbackQuery):
+    await c.answer()
+    chat_id = c.data.replace("pick_group_", "")
+    uid = c.from_user.id
+
+    selected_group[uid] = chat_id
+
+    async with SessionLocal() as db:
+        g = (await db.execute(
+            select(BotGroup).where(BotGroup.chat_id == chat_id)
+        )).scalars().first()
+
+    title = g.title if g and g.title else chat_id
+
+    await safe_edit(
+        c.message,
+        f"✅ Đã chọn nhóm:\n{title}\n\n🏠 Trang chủ",
+        reply_markup=start_menu_kb()
+    )
+
+@dp.callback_query(F.data == "lang_vi")
+async def lang_vi(c: types.CallbackQuery):
+    await c.answer()
+    selected_lang[c.from_user.id] = "vi"
+    await safe_edit(c.message, "✅ Đã chọn: Tiếng Việt", reply_markup=start_menu_kb())
+
+@dp.callback_query(F.data == "lang_en")
+async def lang_en(c: types.CallbackQuery):
+    await c.answer()
+    selected_lang[c.from_user.id] = "en"
+    await safe_edit(c.message, "✅ Selected: English", reply_markup=start_menu_kb())
 
 # ======================
 # KEYWORD MENU
@@ -658,7 +568,7 @@ async def kw_add(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "kw_add_key"
     temp[uid] = {}
-    await c.message.answer("Vui lòng gửi từ khóa (nếu có nhiều từ khóa, vui lòng xuống dòng):")
+    await c.message.answer("Vui lòng gửi từ khóa mới:")
 
 @dp.callback_query(F.data == "kw_list")
 async def kw_list(c: types.CallbackQuery):
@@ -710,7 +620,7 @@ async def kw_text(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "kw_edit_text"
     temp[uid] = {"id": kid}
-    await c.message.answer("Vui lòng nhập văn bản, hình ảnh, hoặc nội dung hình ảnh + văn bản")
+    await c.message.answer("Nhập văn bản phản hồi:")
 
 @dp.callback_query(F.data.startswith("kw_img_"))
 async def kw_img(c: types.CallbackQuery):
@@ -719,7 +629,7 @@ async def kw_img(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "kw_edit_image"
     temp[uid] = {"id": kid}
-    await c.message.answer("Vui lòng nhập ảnh hoặc URL/file_id ảnh:")
+    await c.message.answer("Gửi ảnh hoặc nhập URL/file_id ảnh:")
 
 @dp.callback_query(F.data.startswith("kw_btn_"))
 async def kw_btn(c: types.CallbackQuery):
@@ -729,13 +639,9 @@ async def kw_btn(c: types.CallbackQuery):
     user_state[uid] = "kw_edit_button"
     temp[uid] = {"id": kid}
     await c.message.answer(
-        "Nút thiết lập\n\n"
-        "Gợi ý:\n"
-        "1. - Bên trái dấu gạch ngang là tên nút, bên phải là liên kết\n"
-        "2. && được sử dụng để ngăn cách nhiều nút trong cùng một dòng\n"
-        "3. Xuống dòng có thể giúp nút bắt đầu dòng mới\n\n"
-        "Ví dụ:\n"
-        "Tên liên kết-https://t.me/xx"
+        "Format nút:\n"
+        "Google - https://google.com && YouTube - https://youtube.com\n"
+        "Mỗi dòng là một hàng."
     )
 
 @dp.callback_query(F.data.startswith("kw_pre_"))
@@ -802,7 +708,7 @@ async def wl_text(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "wl_edit_text"
     temp[uid] = {"id": wid}
-    await c.message.answer("Vui lòng nhập văn bản, hình ảnh, hoặc nội dung hình ảnh + văn bản")
+    await c.message.answer("Nhập văn bản chào mừng:")
 
 @dp.callback_query(F.data.startswith("wl_img_"))
 async def wl_img(c: types.CallbackQuery):
@@ -811,7 +717,7 @@ async def wl_img(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "wl_edit_image"
     temp[uid] = {"id": wid}
-    await c.message.answer("Vui lòng nhập ảnh hoặc URL/file_id ảnh:")
+    await c.message.answer("Gửi ảnh hoặc nhập URL/file_id ảnh:")
 
 @dp.callback_query(F.data.startswith("wl_btn_"))
 async def wl_btn(c: types.CallbackQuery):
@@ -821,11 +727,9 @@ async def wl_btn(c: types.CallbackQuery):
     user_state[uid] = "wl_edit_button"
     temp[uid] = {"id": wid}
     await c.message.answer(
-        "Nút thiết lập\n\n"
-        "Gợi ý:\n"
-        "1. - Bên trái dấu gạch ngang là tên nút, bên phải là liên kết\n"
-        "2. && được sử dụng để ngăn cách nhiều nút trong cùng một dòng\n"
-        "3. Xuống dòng có thể giúp nút bắt đầu dòng mới"
+        "Format nút:\n"
+        "Google - https://google.com && YouTube - https://youtube.com\n"
+        "Mỗi dòng là một hàng."
     )
 
 @dp.callback_query(F.data.startswith("wl_delmin_"))
@@ -934,7 +838,7 @@ async def auto_img(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "auto_edit_image"
     temp[uid] = {"id": pid}
-    await c.message.answer("Vui lòng nhập ảnh hoặc URL/file_id ảnh:")
+    await c.message.answer("Gửi ảnh hoặc nhập URL/file_id ảnh:")
 
 @dp.callback_query(F.data.startswith("auto_btn_"))
 async def auto_btn(c: types.CallbackQuery):
@@ -944,11 +848,9 @@ async def auto_btn(c: types.CallbackQuery):
     user_state[uid] = "auto_edit_button"
     temp[uid] = {"id": pid}
     await c.message.answer(
-        "Nút thiết lập\n\n"
-        "Gợi ý:\n"
-        "1. - Bên trái dấu gạch ngang là tên nút, bên phải là liên kết\n"
-        "2. && được sử dụng để ngăn cách nhiều nút trong cùng một dòng\n"
-        "3. Xuống dòng có thể giúp nút bắt đầu dòng mới"
+        "Format nút:\n"
+        "Google - https://google.com && YouTube - https://youtube.com\n"
+        "Mỗi dòng là một hàng."
     )
 
 @dp.callback_query(F.data.startswith("auto_chat_"))
@@ -968,15 +870,6 @@ async def auto_int(c: types.CallbackQuery):
     user_state[uid] = "auto_edit_interval"
     temp[uid] = {"id": pid}
     await c.message.answer("Nhập khoảng thời gian lặp lại (phút):")
-
-@dp.callback_query(F.data.startswith("auto_time_"))
-async def auto_time(c: types.CallbackQuery):
-    await c.answer()
-    pid = int(c.data.split("_")[-1])
-    uid = c.from_user.id
-    user_state[uid] = "auto_edit_time"
-    temp[uid] = {"id": pid}
-    await c.message.answer("Nhập khoảng thời gian / ghi chú thời gian (nếu muốn):")
 
 @dp.callback_query(F.data.startswith("auto_start_"))
 async def auto_start(c: types.CallbackQuery):
@@ -1026,35 +919,42 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
-    # --- KW ---
+    # ---- KEYWORD ----
     if state == "kw_add_key":
         key = (m.text or "").strip()
         if not key:
             return await m.answer("Từ khoá không được để trống.")
+
         async with SessionLocal() as db:
             exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
             if exists:
                 return await m.answer("Keyword đã tồn tại, nhập keyword khác.")
             db.add(Keyword(key=key, mode="exact", active=1))
             await db.commit()
+
         reset(uid)
-        return await m.answer(f"Đã tạo keyword: {key}", reply_markup=home())
+        return await m.answer(f"Đã tạo keyword: {key}", reply_markup=start_menu_kb())
 
     if state == "kw_edit_key":
         kid = temp[uid]["id"]
         key = (m.text or "").strip()
         if not key:
             return await m.answer("Từ khoá không được để trống.")
+
         async with SessionLocal() as db:
-            exists = (await db.execute(select(Keyword).where(Keyword.key == key, Keyword.id != kid))).scalars().first()
+            exists = (await db.execute(
+                select(Keyword).where(Keyword.key == key, Keyword.id != kid)
+            )).scalars().first()
             if exists:
                 return await m.answer("Keyword đã tồn tại, nhập keyword khác.")
+
             k = await db.get(Keyword, kid)
             if k:
                 k.key = key
                 await db.commit()
+
         reset(uid)
-        return await m.answer("Đã cập nhật từ khoá.", reply_markup=home())
+        return await m.answer("Đã cập nhật từ khoá.", reply_markup=start_menu_kb())
 
     if state == "kw_edit_text":
         kid = temp[uid]["id"]
@@ -1064,7 +964,7 @@ async def all_messages(m: types.Message):
                 k.text = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật nội dung văn bản.", reply_markup=home())
+        return await m.answer("Đã cập nhật nội dung văn bản.", reply_markup=start_menu_kb())
 
     if state == "kw_edit_image":
         kid = temp[uid]["id"]
@@ -1077,7 +977,7 @@ async def all_messages(m: types.Message):
                 k.image = image
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật phương tiện.", reply_markup=home())
+        return await m.answer("Đã cập nhật phương tiện.", reply_markup=start_menu_kb())
 
     if state == "kw_edit_button":
         kid = temp[uid]["id"]
@@ -1087,9 +987,9 @@ async def all_messages(m: types.Message):
                 k.button = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật nút.", reply_markup=home())
+        return await m.answer("Đã cập nhật nút.", reply_markup=start_menu_kb())
 
-    # --- WELCOME ---
+    # ---- WELCOME ----
     if state == "wl_add_chat":
         chat_id = (m.text or "").strip()
         if not chat_id:
@@ -1101,7 +1001,7 @@ async def all_messages(m: types.Message):
             db.add(WelcomeSetting(chat_id=chat_id))
             await db.commit()
         reset(uid)
-        return await m.answer("Đã tạo cấu hình chào mừng.", reply_markup=home())
+        return await m.answer("Đã tạo cấu hình chào mừng.", reply_markup=start_menu_kb())
 
     if state == "wl_edit_text":
         wid = temp[uid]["id"]
@@ -1111,7 +1011,7 @@ async def all_messages(m: types.Message):
                 w.text = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật văn bản.", reply_markup=home())
+        return await m.answer("Đã cập nhật văn bản.", reply_markup=start_menu_kb())
 
     if state == "wl_edit_image":
         wid = temp[uid]["id"]
@@ -1124,7 +1024,7 @@ async def all_messages(m: types.Message):
                 w.image = image
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật phương tiện.", reply_markup=home())
+        return await m.answer("Đã cập nhật phương tiện.", reply_markup=start_menu_kb())
 
     if state == "wl_edit_button":
         wid = temp[uid]["id"]
@@ -1134,7 +1034,7 @@ async def all_messages(m: types.Message):
                 w.button = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật nút.", reply_markup=home())
+        return await m.answer("Đã cập nhật nút.", reply_markup=start_menu_kb())
 
     if state == "wl_edit_delete_after":
         wid = temp[uid]["id"]
@@ -1150,9 +1050,9 @@ async def all_messages(m: types.Message):
                 w.delete_after = minutes
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật thời gian xoá.", reply_markup=home())
+        return await m.answer("Đã cập nhật thời gian xoá.", reply_markup=start_menu_kb())
 
-    # --- AUTO ---
+    # ---- AUTO ----
     if state == "auto_add_chat":
         chat_id = (m.text or "").strip()
         if not chat_id:
@@ -1161,7 +1061,7 @@ async def all_messages(m: types.Message):
             db.add(AutoPost(chat_id=chat_id))
             await db.commit()
         reset(uid)
-        return await m.answer("Đã tạo auto post.", reply_markup=home())
+        return await m.answer("Đã tạo auto post.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_text":
         pid = temp[uid]["id"]
@@ -1171,7 +1071,7 @@ async def all_messages(m: types.Message):
                 p.text = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật nội dung văn bản.", reply_markup=home())
+        return await m.answer("Đã cập nhật nội dung văn bản.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_image":
         pid = temp[uid]["id"]
@@ -1184,7 +1084,7 @@ async def all_messages(m: types.Message):
                 p.image = image
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật phương tiện.", reply_markup=home())
+        return await m.answer("Đã cập nhật phương tiện.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_button":
         pid = temp[uid]["id"]
@@ -1194,7 +1094,7 @@ async def all_messages(m: types.Message):
                 p.button = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật nút.", reply_markup=home())
+        return await m.answer("Đã cập nhật nút.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_chat":
         pid = temp[uid]["id"]
@@ -1207,7 +1107,7 @@ async def all_messages(m: types.Message):
                 p.chat_id = chat_id
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật chat_id.", reply_markup=home())
+        return await m.answer("Đã cập nhật chat_id.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_interval":
         pid = temp[uid]["id"]
@@ -1223,7 +1123,7 @@ async def all_messages(m: types.Message):
                 p.interval = interval
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật interval.", reply_markup=home())
+        return await m.answer("Đã cập nhật interval.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_start":
         pid = temp[uid]["id"]
@@ -1235,7 +1135,7 @@ async def all_messages(m: types.Message):
                 p.start_at = m.text.strip()
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật ngày bắt đầu.", reply_markup=home())
+        return await m.answer("Đã cập nhật ngày bắt đầu.", reply_markup=start_menu_kb())
 
     if state == "auto_edit_end":
         pid = temp[uid]["id"]
@@ -1247,12 +1147,14 @@ async def all_messages(m: types.Message):
                 p.end_at = m.text.strip()
                 await db.commit()
         reset(uid)
-        return await m.answer("Đã cập nhật ngày kết thúc.", reply_markup=home())
+        return await m.answer("Đã cập nhật ngày kết thúc.", reply_markup=start_menu_kb())
 
-    # --- KEYWORD AUTO REPLY ---
+    # ---- KEYWORD AUTO REPLY ----
     text_ = (m.text or "").strip()
     if not text_ or text_.startswith("/"):
         return
+
+    print(f"[MSG] chat={m.chat.id} user={uid} text={text_}")
 
     async with SessionLocal() as db:
         kws = (await db.execute(
@@ -1262,32 +1164,47 @@ async def all_messages(m: types.Message):
     if not kws:
         return
 
+    lower_text = text_.lower()
     matched = None
-    lower = text_.lower()
+
     for k in kws:
-        key = (k.key or "").lower()
-        if k.mode == "exact" and lower == key:
+        key = (k.key or "").strip().lower()
+        if not key:
+            continue
+
+        if k.mode == "exact" and lower_text == key:
             matched = k
             break
-        if k.mode == "contains" and key in lower:
+
+        if k.mode == "contains" and key in lower_text:
             matched = k
             break
 
     if matched:
-        await send_preview(chat_id=m.chat.id, text=matched.text, image=matched.image, button=matched.button)
+        print(f"[KW MATCH] {matched.key}")
+        await send_preview(
+            chat_id=m.chat.id,
+            text=matched.text,
+            image=matched.image,
+            button=matched.button
+        )
 
 # ======================
-# WELCOME MEMBER
+# WELCOME NEW MEMBER
 # ======================
 @dp.message(F.new_chat_members)
 async def welcome_new_member(m: types.Message):
     if not m.chat:
         return
+
     chat_id = str(m.chat.id)
 
     async with SessionLocal() as db:
         w = (await db.execute(
-            select(WelcomeSetting).where(WelcomeSetting.chat_id == chat_id, WelcomeSetting.active == 1)
+            select(WelcomeSetting).where(
+                WelcomeSetting.chat_id == chat_id,
+                WelcomeSetting.active == 1
+            )
         )).scalars().first()
 
     if not w:
@@ -1305,6 +1222,7 @@ async def welcome_new_member(m: types.Message):
                 await asyncio.sleep(w.delete_after * 60)
                 with contextlib.suppress(Exception):
                     await bot.delete_message(chat_id=m.chat.id, message_id=msg.message_id)
+
             asyncio.create_task(later_delete())
 
     except Exception as e:
@@ -1319,7 +1237,9 @@ async def auto_worker():
             now = int(time.time())
 
             async with SessionLocal() as db:
-                posts = (await db.execute(select(AutoPost).where(AutoPost.active == 1))).scalars().all()
+                posts = (await db.execute(
+                    select(AutoPost).where(AutoPost.active == 1)
+                )).scalars().all()
 
             for p in posts:
                 if not p.chat_id:
@@ -1379,7 +1299,9 @@ async def webhook(req: Request):
 @app.on_event("startup")
 async def startup():
     global worker_task
-    await ensure_schema()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     worker_task = asyncio.create_task(auto_worker())
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(f"{BASE_URL}/webhook")
@@ -1388,10 +1310,13 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     global worker_task
+
     if worker_task:
         worker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
+
     with contextlib.suppress(Exception):
         await bot.delete_webhook()
+
     await bot.session.close()

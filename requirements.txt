@@ -7,3 +7,4 @@ SQLAlchemy
 python-dotenv
 openai
 asyncpg
+redis[hiredis]

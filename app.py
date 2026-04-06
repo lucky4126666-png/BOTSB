@@ -35,6 +35,7 @@ ADMIN_IDS = {
     if x.strip().isdigit()
 }
 WEB_ADMIN_KEY = os.getenv("WEB_ADMIN_KEY", "")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "nnnnzubot")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -58,12 +59,11 @@ private_menu_msg = {}
 admin_cache = set()
 
 STRANGER_TEXT = (
-    '点击此处可以<a href="https://t.me/nnnnzubot?startgroup=foo">添加机器人进群</a>\n\n'
+    '点击此处可以<a href="https://t.me/nnnnzubot?startgroup=true">添加机器人进群</a>\n\n'
     '更多服务，请访问<a href="https://t.me/xbkf/">官方服务</a>'
 )
 
 INIT_GROUP_TEXT = "组防骗助手为您服务,我正在进行相关初始化配置请稍后"
-
 
 LANG_TEXT = {
     "zh": {
@@ -127,7 +127,7 @@ def stranger_start_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="➕ 添加机器人进群",
-            url="https://t.me/nnnnzubot?startgroup=foo"
+            url=f"https://t.me/{BOT_USERNAME}?startgroup=true"
         )],
         [InlineKeyboardButton(
             text="🌐 官方服务",
@@ -649,13 +649,14 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
     old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
 
+    print(f"[MY_CHAT_MEMBER] chat_id={chat.id} type={chat.type} old={old_status} new={new_status}")
+
     if chat.type not in ("group", "supergroup"):
         return
 
     chat_id = str(chat.id)
     now_ts = int(time.time())
 
-    # bot mới được thêm vào nhóm
     bot_just_added = old_status in ("left", "kicked") and new_status in ("member", "administrator")
 
     if new_status in ("member", "administrator"):
@@ -681,8 +682,8 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 
             await db.commit()
 
-        # Khi bot vừa được thêm vào nhóm thì gửi thông báo + 2 nút
         if bot_just_added:
+            print("[MY_CHAT_MEMBER] bot just added -> sending init message")
             with contextlib.suppress(Exception):
                 await bot.send_message(
                     chat_id=chat.id,
@@ -706,7 +707,9 @@ async def start(m: types.Message):
 
     uid = m.from_user.id
 
-    # Người lạ: trả đúng nội dung có link ẩn
+    print("[START]", uid, m.chat.type, is_allowed_user(uid))
+
+    # Người lạ trong private: trả text HTML
     if m.chat.type == "private" and not is_allowed_user(uid):
         await m.answer(
             STRANGER_TEXT,
@@ -715,7 +718,6 @@ async def start(m: types.Message):
         )
         return
 
-    # Admin / owner
     if not is_allowed_user(uid):
         return
 
@@ -792,6 +794,7 @@ async def group_menu(c: types.CallbackQuery):
 async def lang_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
+    print("[LANG MENU]", c.from_user.id, is_allowed_user(c.from_user.id))
     await safe_edit(c.message, t(c.from_user.id, "lang_title"), reply_markup=lang_menu_kb())
 
 
@@ -1901,4 +1904,3 @@ async def shutdown():
         await bot.delete_webhook()
 
     await bot.session.close()
-

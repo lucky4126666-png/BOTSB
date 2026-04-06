@@ -1,1 +1,51 @@
+html
+{% extends "base.html" %}
 
+{% block title %}Auto{% endblock %}
+{% block page_title %}Auto{% endblock %}
+{% block page_subtitle %}Danh sách auto post{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Auto Posts</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Chat ID</th>
+          <th>Active</th>
+          <th>Interval</th>
+          <th>Pin</th>
+          <th>Start</th>
+          <th>End</th>
+          <th>Last Sent</th>
+          <th>Text</th>
+          <th>Image</th>
+          <th>Button</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in autos %}
+        <tr>
+          <td>{{ p.id }}</td>
+          <td>{{ p.chat_id }}</td>
+          <td>{{ "✅" if p.active else "❌" }}</td>
+          <td>{{ p.interval }}</td>
+          <td>{{ "✅" if p.pin else "❌" }}</td>
+          <td>{{ p.start_at }}</td>
+          <td>{{ p.end_at }}</td>
+          <td>{{ p.last_sent_ts }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ p.text }}</td>
+          <td class="text-truncate" style="max-width:160px">{{ p.image }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ p.button }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

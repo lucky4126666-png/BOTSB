@@ -1,233 +1,176 @@
-import os, json, asyncio
-from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Text, select, delete
-from dotenv import load_dotenv
+import os
+import logging
+import psycopg2
+import redis
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from telegram.ext import (Updater, CommandHandler, CallbackQueryHandler,
+                          CallbackContext, MessageHandler, Filters)
 
-load_dotenv()
+# ---- ENV VAR ----
+TOKEN      = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+PG_URL     = os.environ.get("DATABASE_URL", "postgres://....")
+REDIS_URL  = os.environ.get("REDIS_URL", "redis://....")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-BASE_URL = os.getenv("BASE_URL")
-DATABASE_URL = os.getenv("DATABASE_URL")
+logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-app = FastAPI()
+# ---- DB ----
+def get_pg_conn():
+    return psycopg2.connect(PG_URL, sslmode='require')
+r = redis.from_url(REDIS_URL)
 
-engine = create_async_engine(DATABASE_URL)
-SessionLocal = sessionmaker(engine, class_=AsyncSession)
-Base = declarative_base()
+# USERS & ADMIN
+def add_user(user):
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO users (user_id, username, first_name, last_name)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING;
+            """, (user.id, user.username, user.first_name, user.last_name))
+            conn.commit()
+    finally:
+        conn.close()
 
-# ===== STATE =====
-user_state = {}
-temp = {}
+def set_admin(user_id):
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT DO NOTHING;", (user_id,))
+            conn.commit()
+    finally:
+        conn.close()
+def get_admin_ids():
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id FROM admins;")
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+def is_admin(user_id):
+    return user_id in get_admin_ids()
 
-def reset(uid):
-    user_state.pop(uid, None)
-    temp.pop(uid, None)
+# BANNED WORDS
+def get_banned_words():
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT word FROM banned_words;")
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+def add_banned_word(word):
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO banned_words (word) VALUES (%s) ON CONFLICT DO NOTHING;", (word,))
+            conn.commit()
+    finally:
+        conn.close()
+def remove_banned_word(word):
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM banned_words WHERE word=%s;", (word,))
+            conn.commit()
+    finally:
+        conn.close()
 
-# ===== BUTTON PARSER =====
-def parse_buttons(text):
-    if not text:
-        return None
-    rows = []
-    for line in text.split("\n"):
-        row = []
-        for part in line.split("&&"):
-            if "-" in part:
-                t, u = part.split("-", 1)
-                row.append({"text": t.strip(), "url": u.strip()})
-        if row:
-            rows.append(row)
-    return rows
+# Đếm tin nhắn
+def count_msg(user_id):
+    key = f"user:{user_id}:count"
+    return r.incr(key)
 
-def build_buttons(data):
-    if not data:
-        return None
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=b["text"], url=b["url"]) for b in row]
-        for row in data
-    ])
-
-# ===== MODELS =====
-class Keyword(Base):
-    __tablename__ = "keywords"
-    id = Column(Integer, primary_key=True)
-    key = Column(String)
-    text = Column(Text)
-    image = Column(Text)
-    button = Column(Text)
-
-class AutoPost(Base):
-    __tablename__ = "auto_post"
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(String)
-    text = Column(Text)
-    image = Column(Text)
-    button = Column(Text)
-    interval = Column(Integer, default=10)
-    is_active = Column(Integer, default=0)
-    pin = Column(Integer, default=0)
-
-class Welcome(Base):
-    __tablename__ = "welcome"
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(String)
-    text = Column(Text)
-    button = Column(Text)
-
-# ===== MENU =====
-def home():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("📌 Từ khoá", callback_data="kw_menu")],
-        [InlineKeyboardButton("📅 Auto Post", callback_data="auto_menu")],
-        [InlineKeyboardButton("👋 Welcome", callback_data="wel_menu")]
-    ])
-
-# ===== START =====
-@dp.message(F.text == "/start")
-async def start(m):
-    await m.answer("🚀 Menu", reply_markup=home())
-
-# ======================
-# 📌 KEYWORD
-# ======================
-
-@dp.callback_query(F.data == "kw_menu")
-async def kw_menu(c):
-    await c.message.edit_text("📌 Từ khoá", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("➕ Thêm", callback_data="kw_add")],
-        [InlineKeyboardButton("📋 Danh sách", callback_data="kw_list")],
-        [InlineKeyboardButton("🔙 Menu", callback_data="home")]
-    ]))
-
-@dp.callback_query(F.data == "kw_add")
-async def kw_add(c):
-    user_state[c.from_user.id] = "kw_key"
-    temp[c.from_user.id] = {}
-    await c.message.edit_text("Nhập từ khoá")
-
-@dp.callback_query(F.data == "kw_list")
-async def kw_list(c):
-    async with SessionLocal() as db:
-        kws = (await db.execute(select(Keyword))).scalars().all()
-
-    kb = []
-    for k in kws:
-        kb.append([
-            InlineKeyboardButton(k.key, callback_data=f"kw_view_{k.id}"),
-            InlineKeyboardButton("❌", callback_data=f"kw_del_{k.id}")
+# ------ NÚT MENU ------ #
+def full_menu(is_admin=False):
+    btns = [
+        [
+            InlineKeyboardButton("📄 Hướng dẫn", callback_data="guide"),
+            InlineKeyboardButton("🔗 Đăng ký", callback_data="register")
+        ],
+        [
+            InlineKeyboardButton("📋 Danh sách từ cấm", callback_data="listban"),
+            InlineKeyboardButton("📊 Thống kê", callback_data="stat")
+        ]
+    ]
+    if is_admin:
+        btns.append([
+            InlineKeyboardButton("➕ Thêm từ cấm", callback_data="addban"),
+            InlineKeyboardButton("🚫 Xóa từ cấm", callback_data="delban"),
         ])
+    btns.append([InlineKeyboardButton("🔒 Đóng menu", callback_data="close")])
+    return InlineKeyboardMarkup(btns)
+def make_back_menu():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Quay lại Menu", callback_data="menu")]])
 
-    kb.append([InlineKeyboardButton("🔙", callback_data="home")])
-    await c.message.edit_text("Danh sách", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+# ------ LUỒNG CHÍNH ------ #
+def menu(update: Update, context: CallbackContext):
+    admin = is_admin(update.effective_user.id)
+    reply_markup = full_menu(admin)
+    text = "🎛 <b>MENU QUẢN TRỊ NHÓM:</b>"
+    if update.callback_query:
+        update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    else:
+        update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
-@dp.callback_query(F.data.startswith("kw_del_"))
-async def kw_del(c):
-    kid = int(c.data.split("_")[-1])
-    async with SessionLocal() as db:
-        await db.execute(delete(Keyword).where(Keyword.id == kid))
-        await db.commit()
-    await c.answer("Đã xoá")
+def buttons(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    query = update.callback_query
+    data = query.data
 
-# ======================
-# 📅 AUTO POST
-# ======================
-
-@dp.callback_query(F.data == "auto_menu")
-async def auto_menu(c):
-    await c.message.edit_text("📅 Auto", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("➕ Tạo", callback_data="auto_add")],
-        [InlineKeyboardButton("📋 Danh sách", callback_data="auto_list")],
-        [InlineKeyboardButton("🔙", callback_data="home")]
-    ]))
-
-@dp.callback_query(F.data == "auto_list")
-async def auto_list(c):
-    async with SessionLocal() as db:
-        posts = (await db.execute(select(AutoPost))).scalars().all()
-
-    kb = []
-    for p in posts:
-        kb.append([
-            InlineKeyboardButton(f"Post {p.id}", callback_data=f"auto_view_{p.id}"),
-            InlineKeyboardButton("❌", callback_data=f"auto_del_{p.id}")
-        ])
-
-    await c.message.edit_text("Danh sách auto", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data.startswith("auto_del_"))
-async def auto_del(c):
-    pid = int(c.data.split("_")[-1])
-    async with SessionLocal() as db:
-        await db.execute(delete(AutoPost).where(AutoPost.id == pid))
-        await db.commit()
-    await c.answer("Đã xoá")
-
-# ======================
-# 👋 WELCOME
-# ======================
-
-@dp.callback_query(F.data == "wel_menu")
-async def wel_menu(c):
-    await c.message.edit_text("👋 Welcome", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("✏️ Sửa text", callback_data="wel_text")],
-        [InlineKeyboardButton("🔘 Sửa nút", callback_data="wel_btn")],
-        [InlineKeyboardButton("👁 Preview", callback_data="wel_preview")],
-        [InlineKeyboardButton("🔙", callback_data="home")]
-    ]))
-
-# ======================
-# 🤖 AUTO WORKER
-# ======================
-
-async def auto_worker():
-    while True:
-        async with SessionLocal() as db:
-            posts = (await db.execute(select(AutoPost))).scalars().all()
-
-        for p in posts:
-            if p.is_active:
-                btn = build_buttons(parse_buttons(p.button))
-                if p.image:
-                    msg = await bot.send_photo(p.chat_id, p.image, caption=p.text or "", reply_markup=btn)
-                else:
-                    msg = await bot.send_message(p.chat_id, p.text or "", reply_markup=btn)
-
-                if p.pin:
-                    try:
-                        await bot.pin_chat_message(p.chat_id, msg.message_id)
-                    except:
-                        pass
-
-        await asyncio.sleep(60)
-
-# ======================
-# 🌐 WEBHOOK
-# ======================
-
-@app.post("/webhook")
-async def webhook(req: Request):
-    data = await req.json()
-    await dp.feed_update(bot, types.Update(**data))
-    return {"ok": True}
-
-@app.get("/")
-async def root():
-    return RedirectResponse("/dashboard")
-
-@app.on_event("startup")
-async def startup():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    asyncio.create_task(auto_worker())
-
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(f"{BASE_URL}/webhook")
-
-    print("BOT READY")
+    if data == "menu":
+        menu(update, context)
+    elif data == "close":
+        query.edit_message_text("🔒 Menu đã đóng.")
+    elif data == "guide":
+        query.edit_message_text(
+            "🤖 <b>Bot quản trị nhóm toàn nút:</b>"
+            "\n- Bấm <b>Thêm từ cấm</b> để thêm"
+            "\n- Bấm <b>Xóa từ cấm</b> để xóa"
+            "\n- Xem hướng dẫn, top, danh sách cấm đều bằng nút.",
+            reply_markup=full_menu(is_admin(user_id)),
+            parse_mode=ParseMode.HTML,
+        )
+    elif data == "register":
+        query.edit_message_text("📝 Đăng ký tại: https://yourwebsite.com/register", 
+                               reply_markup=full_menu(is_admin(user_id)), parse_mode=ParseMode.HTML)
+    elif data == "listban":
+        words = get_banned_words()
+        txt = "\n".join(words) if words else "Chưa có từ cấm nào."
+        query.edit_message_text("📋 <b>Danh sách từ cấm:</b>\n" + txt, reply_markup=make_back_menu(), parse_mode=ParseMode.HTML)
+    elif data == "addban" and is_admin(user_id):
+        query.edit_message_text("✏️ Gửi từ khoá bạn muốn cấm dưới tin nhắn này.", reply_markup=make_back_menu())
+        context.user_data['awaiting_add_ban'] = True
+    elif data == "delban" and is_admin(user_id):
+        words = get_banned_words()
+        if not words:
+            query.edit_message_text("⛔ Chưa có từ cấm nào!", reply_markup=make_back_menu())
+            return
+        btns = [
+            [InlineKeyboardButton(word, callback_data=f"del_{word}")]
+            for word in words
+        ]
+        btns.append([InlineKeyboardButton("🔙 Quay lại Menu", callback_data="menu")])
+        query.edit_message_text("🚫 <b>BẤM vào từ bạn muốn xoá:</b>", reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
+    elif data.startswith("del_") and is_admin(user_id):
+        word = data[4:]
+        remove_banned_word(word)
+        query.answer(f"Đã xoá '{word}'")
+        words = get_banned_words()
+        txt = "\n".join(words) if words else "(Đã xoá hết từ cấm!)"
+        query.edit_message_text(
+            f"☑️ Đã xoá <b>{word}</b>.\nCòn lại:\n{txt}",
+            reply_markup=make_back_menu(), parse_mode=ParseMode.HTML
+        )
+    elif data == "stat":
+        user_msgs = []
+        for k in r.scan_iter("user:*:count"):
+            uid = k.decode().split(":")[1]
+            cnt = int(r.get(k))
+            user_msgs.append((uid, cnt))
+        top = sorted(user_msgs, key=lambda x: x[1], reverse=True)[:5]
+        txt = "\n".join([f"<code>{uid}</code>: {cnt} tin" for uid, cnt in top]) if top else "Chưa có dữ liệu."
+        query.edit_message_text("📊 <b>Top Gửi Tin:</b>\n" + txt, reply_markup=make_back_menu(), parse_mode=ParseMode.HTML)
+    else:
+        query.answer("Không rõ thao tác hoặc bạn không phải admin.")

@@ -1,1 +1,64 @@
+html
+{% extends "base.html" %}
 
+{% block title %}Admins{% endblock %}
+{% block page_title %}Admins{% endblock %}
+{% block page_subtitle %}Quản lý admin trong DB{% endblock %}
+
+{% block content %}
+<div class="panel-card mb-4">
+  <div class="panel-header">
+    <h5 class="mb-0">Add Admin</h5>
+  </div>
+
+  <form method="post" action="{{ url_for('admins_add') }}" class="row g-3">
+    <input type="hidden" name="key" value="{{ admin_key }}">
+    <div class="col-12 col-md-3">
+      <input type="number" name="user_id" class="form-control form-control-dark" placeholder="User ID" required>
+    </div>
+    <div class="col-12 col-md-7">
+      <input type="text" name="note" class="form-control form-control-dark" placeholder="Note">
+    </div>
+    <div class="col-12 col-md-2">
+      <button class="btn btn-primary w-100" type="submit">Add</button>
+    </div>
+  </form>
+</div>
+
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Admin List</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>User ID</th>
+          <th>Note</th>
+          <th>Created At</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in admins %}
+        <tr>
+          <td>{{ a.id }}</td>
+          <td>{{ a.user_id }}</td>
+          <td>{{ a.note }}</td>
+          <td>{{ a.created_at }}</td>
+          <td class="text-end">
+            <form method="post" action="{{ url_for('admins_delete') }}" class="d-inline">
+              <input type="hidden" name="key" value="{{ admin_key }}">
+              <input type="hidden" name="user_id" value="{{ a.user_id }}">
+              <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

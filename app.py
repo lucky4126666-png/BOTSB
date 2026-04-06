@@ -1524,13 +1524,14 @@ async def health():
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
-    print("[WEBHOOK UPDATE]", data)
+    print("[WEBHOOK UPDATE RAW]", data)
 
     update = types.Update.model_validate(data)
+    print("[WEBHOOK UPDATE TYPE]", update.event_type)
+
     await dp.feed_update(bot, update)
     return {"ok": True}
-
-
+    
 async def ensure_schema():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

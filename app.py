@@ -1251,7 +1251,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("Đã cập nhật ngày kết thúc.", reply_markup=start_menu_kb())
 
-    # ---- KEYWORD AUTO REPLY ----
+       # ---- KEYWORD AUTO REPLY ----
     text_ = (m.text or m.caption or "").strip()
     if not text_ or text_.startswith("/"):
         return
@@ -1288,7 +1288,8 @@ async def all_messages(m: types.Message):
             image=matched.image,
             button=matched.button
         )
-
+    else:
+        print("[KW NO MATCH]") 
 
 # ======================
 # WELCOME NEW MEMBER
@@ -1423,12 +1424,11 @@ async def startup():
         print("[STARTUP] old webhook deleted")
 
         result = await bot.set_webhook(
-            webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query", "my_chat_member"]
-        )
-        print("[STARTUP] set_webhook result =", result)
-
+    webhook_url,
+    drop_pending_updates=True,
+    allowed_updates=["message", "callback_query", "my_chat_member"]
+)
+print("[STARTUP] set_webhook result =", result)
         info = await bot.get_webhook_info()
         print("[STARTUP] webhook info =", info.model_dump())
 

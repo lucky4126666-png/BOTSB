@@ -1,10 +1,10 @@
 fastapi
 uvicorn
+jinja2
 python-multipart
+itsdangerous
 aiogram
 SQLAlchemy
 aiosqlite
 python-dotenv
 openai
-jinja2
-asyncpg

@@ -123,6 +123,8 @@ def extract_image_from_message(m: types.Message):
         return m.photo[-1].file_id
     if m.text:
         return m.text.strip()
+    if m.caption:
+        return m.caption.strip()
     return None
 
 
@@ -612,7 +614,10 @@ async def kw_add(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "kw_add_key"
     temp[uid] = {}
-    await c.message.answer("Vui lòng gửi từ khóa mới:")
+    await c.message.answer(
+        "Gửi từ khóa mới.\n"
+        "Nếu muốn tạo nhiều từ khóa cùng lúc, hãy xuống dòng mỗi từ khóa một dòng."
+    )
 
 
 @dp.callback_query(F.data == "kw_list")
@@ -1001,40 +1006,55 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
-    # DEBUG LOG
     print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
 
     # ---- KEYWORD ----
     if state == "kw_add_key":
-        key = (m.text or "").strip()
-        if not key:
+        raw = (m.text or "").strip()
+        if not raw:
             return await m.answer("Từ khoá không được để trống.")
 
+        keys = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not keys:
+            return await m.answer("Từ khoá không được để trống.")
+
+        added = 0
+        existed = 0
+
         async with SessionLocal() as db:
-            exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
-            if exists:
-                return await m.answer("Keyword đã tồn tại, nhập keyword khác.")
-            db.add(Keyword(key=key, mode="exact", active=1, text="", image="", button=""))
+            for key in keys:
+                exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
+                if exists:
+                    existed += 1
+                    continue
+                db.add(Keyword(key=key, mode="exact", active=1, text="", image="", button=""))
+                added += 1
             await db.commit()
 
         reset(uid)
-        return await m.answer(f"Đã tạo keyword: {key}", reply_markup=start_menu_kb())
+        return await m.answer(
+            f"Đã thêm {added} keyword.\nBỏ qua {existed} keyword đã tồn tại.",
+            reply_markup=start_menu_kb()
+        )
 
     if state == "kw_edit_key":
         kid = temp[uid]["id"]
         key = (m.text or "").strip()
         if not key:
             return await m.answer("Từ khoá không được để trống.")
+
         async with SessionLocal() as db:
             exists = (await db.execute(
                 select(Keyword).where(Keyword.key == key, Keyword.id != kid)
             )).scalars().first()
             if exists:
                 return await m.answer("Keyword đã tồn tại, nhập keyword khác.")
+
             k = await db.get(Keyword, kid)
             if k:
                 k.key = key
                 await db.commit()
+
         reset(uid)
         return await m.answer("Đã cập nhật từ khoá.", reply_markup=start_menu_kb())
 
@@ -1232,7 +1252,7 @@ async def all_messages(m: types.Message):
         return await m.answer("Đã cập nhật ngày kết thúc.", reply_markup=start_menu_kb())
 
     # ---- KEYWORD AUTO REPLY ----
-    text_ = (m.text or "").strip()
+    text_ = (m.text or m.caption or "").strip()
     if not text_ or text_.startswith("/"):
         return
 
@@ -1402,7 +1422,11 @@ async def startup():
         await bot.delete_webhook(drop_pending_updates=True)
         print("[STARTUP] old webhook deleted")
 
-        result = await bot.set_webhook(webhook_url)
+        result = await bot.set_webhook(
+            webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "my_chat_member"]
+        )
         print("[STARTUP] set_webhook result =", result)
 
         info = await bot.get_webhook_info()

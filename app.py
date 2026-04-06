@@ -705,13 +705,7 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
         async with SessionLocal() as db:
             await db.execute(delete(BotGroup).where(BotGroup.chat_id == chat_id))
             await db.commit()
-```
-
----
-
-# `app.py` — Part 2/2
-
-```python
+            
 # ======================
 # START / HOME
 # ======================

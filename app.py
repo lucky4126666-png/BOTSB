@@ -700,16 +700,14 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 # ======================
 # START / HOME
 # ======================
-@dp.message(F.text == "/start")
+@dp.message(F.text.startswith("/start"))
 async def start(m: types.Message):
     if not m.from_user:
         return
 
     uid = m.from_user.id
+    print("[START]", uid, m.chat.type, m.text)
 
-    print("[START]", uid, m.chat.type, is_allowed_user(uid))
-
-    # Người lạ trong private: trả text HTML
     if m.chat.type == "private" and not is_allowed_user(uid):
         await m.answer(
             STRANGER_TEXT,
@@ -746,7 +744,6 @@ async def start(m: types.Message):
         return
 
     await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
-
 
 @dp.message(F.text == "/cancel")
 async def cancel(m: types.Message):
@@ -1402,13 +1399,17 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
-    # Người lạ nhắn riêng bất kỳ gì -> trả đúng text HTML
+    print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
+
     if m.chat.type == "private" and not is_allowed_user(uid):
         await m.answer(
             STRANGER_TEXT,
             parse_mode="HTML",
             disable_web_page_preview=False
         )
+        return
+
+    if not is_allowed_user(uid):
         return
 
     # Chặn toàn bộ người lạ ở nơi khác
@@ -1848,7 +1849,6 @@ async def webhook(req: Request):
     update = types.Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
-
 
 async def ensure_schema():
     async with engine.begin() as conn:

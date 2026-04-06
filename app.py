@@ -3440,12 +3440,13 @@ async def startup():
     print("[STARTUP] begin")
 
     try:
+        print("[STARTUP] wait_for_redis...")
+        await wait_for_redis()
+        print("[STARTUP] wait_for_redis done")
+
         print("[STARTUP] wait_for_db...")
         await wait_for_db()
         print("[STARTUP] wait_for_db OK")
-
-        print("[STARTUP] wait_for_redis...")
-        await wait_for_redis()
 
         print("[STARTUP] ensure_schema...")
         await ensure_schema()

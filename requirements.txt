@@ -8,3 +8,4 @@ SQLAlchemy
 aiosqlite
 python-dotenv
 openai
+asyncpg

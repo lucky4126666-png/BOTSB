@@ -4,7 +4,8 @@ import asyncio
 import contextlib
 from datetime import datetime
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
@@ -32,6 +33,8 @@ ADMIN_IDS = {
     if x.strip().isdigit()
 }
 
+WEB_ADMIN_KEY = os.getenv("WEB_ADMIN_KEY", "")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
@@ -48,16 +51,22 @@ temp = {}
 selected_group = {}
 selected_lang = {}
 private_menu_msg = {}
+admin_cache = set()
 
 STRANGER_START_TEXT = "欢迎使用机器人，请点击下方按钮："
+INIT_GROUP_TEXT = "组防骗助手为您服务,我正在进行相关初始化配置请稍后"
 
 
 def is_allowed_user(user_id: int) -> bool:
-    return user_id == OWNER_ID or user_id in ADMIN_IDS
+    return user_id == OWNER_ID or user_id in ADMIN_IDS or user_id in admin_cache
 
 
 def can_change_language(user_id: int) -> bool:
     return is_allowed_user(user_id)
+
+
+def check_web_key(key: str | None) -> bool:
+    return bool(WEB_ADMIN_KEY) and key == WEB_ADMIN_KEY
 
 
 def stranger_start_kb():
@@ -71,6 +80,22 @@ def stranger_start_kb():
             url="https://t.me/xbkf/"
         )]
     ])
+
+
+def init_group_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="公群导航", url="https://t.me/gqdh"),
+            InlineKeyboardButton(text="供需频道", url="https://t.me/gqdh"),
+        ]
+    ])
+
+
+async def load_admin_cache():
+    global admin_cache
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(AdminUser))).scalars().all()
+    admin_cache = {r.user_id for r in rows}
 
 
 async def allowed_or_ignore(c: types.CallbackQuery):
@@ -185,7 +210,7 @@ class Keyword(Base):
     __tablename__ = "keywords"
     id = Column(Integer, primary_key=True)
     key = Column(String, unique=True, index=True)
-    mode = Column(String, default="exact")   # exact / contains
+    mode = Column(String, default="exact")
     active = Column(Integer, default=1)
     text = Column(Text, default="")
     image = Column(Text, default="")
@@ -200,7 +225,7 @@ class WelcomeSetting(Base):
     text = Column(Text, default="")
     image = Column(Text, default="")
     button = Column(Text, default="")
-    delete_after = Column(Integer, default=0)  # phút
+    delete_after = Column(Integer, default=0)
     pin = Column(Integer, default=0)
 
 
@@ -227,6 +252,14 @@ class BotGroup(Base):
     type = Column(String, default="group")
     is_admin = Column(Integer, default=0)
     updated_at = Column(Integer, default=0)
+
+
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, unique=True, index=True)
+    note = Column(String, default="")
+    created_at = Column(Integer, default=0)
 
 
 # ======================
@@ -481,12 +514,88 @@ async def show_auto_view(message, pid):
     )
 
 
+def render_admin_page(admins, key="", msg=""):
+    rows = ""
+    for a in admins:
+        created = "-"
+        if a.created_at:
+            created = datetime.fromtimestamp(a.created_at).strftime("%Y-%m-%d %H:%M:%S")
+
+        if a.user_id == OWNER_ID:
+            action = "<b>OWNER</b>"
+        else:
+            action = f"""
+            <form method="post" action="/admin/delete" style="display:inline">
+                <input type="hidden" name="key" value="{key}">
+                <input type="hidden" name="user_id" value="{a.user_id}">
+                <button type="submit">删除</button>
+            </form>
+            """
+
+        rows += f"""
+        <tr>
+            <td>{a.user_id}</td>
+            <td>{a.note or ""}</td>
+            <td>{created}</td>
+            <td>{action}</td>
+        </tr>
+        """
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>ADMIN 管理面板</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; padding: 24px; background: #f6f7fb; }}
+            .box {{ background: white; padding: 20px; border-radius: 12px; max-width: 900px; margin: auto; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
+            th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
+            th {{ background: #f0f0f0; }}
+            input, button {{ padding: 10px; margin: 4px 0; }}
+            .msg {{ color: green; margin-bottom: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h2>ADMIN 管理面板</h2>
+            {f'<div class="msg">{msg}</div>' if msg else ''}
+            <form method="post" action="/admin/add">
+                <input type="hidden" name="key" value="{key}">
+                <div>
+                    <label>User ID</label><br>
+                    <input type="number" name="user_id" placeholder="输入 Telegram user_id" required>
+                </div>
+                <div>
+                    <label>备注</label><br>
+                    <input type="text" name="note" placeholder="例如：客服 / 运营">
+                </div>
+                <button type="submit">添加 ADMIN</button>
+            </form>
+
+            <h3>当前 ADMIN 列表</h3>
+            <table>
+                <tr>
+                    <th>User ID</th>
+                    <th>备注</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                </tr>
+                {rows}
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+
 # ======================
 # TRACK BOT IN GROUP
 # ======================
 @dp.my_chat_member()
 async def track_bot_membership(event: types.ChatMemberUpdated):
     chat = event.chat
+    old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
 
     if chat.type not in ("group", "supergroup"):
@@ -494,6 +603,8 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 
     chat_id = str(chat.id)
     now_ts = int(time.time())
+
+    bot_just_added = old_status in ("left", "kicked") and new_status in ("member", "administrator")
 
     if new_status in ("member", "administrator"):
         async with SessionLocal() as db:
@@ -518,6 +629,14 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 
             await db.commit()
 
+        if bot_just_added:
+            with contextlib.suppress(Exception):
+                await bot.send_message(
+                    chat_id=chat.id,
+                    text=INIT_GROUP_TEXT,
+                    reply_markup=init_group_kb()
+                )
+
     if new_status in ("left", "kicked"):
         async with SessionLocal() as db:
             await db.execute(delete(BotGroup).where(BotGroup.chat_id == chat_id))
@@ -534,7 +653,7 @@ async def start(m: types.Message):
 
     uid = m.from_user.id
 
-    # Người lạ: chỉ hiện 1 tin + nút bấm
+    # Người lạ: chỉ hiện 1 tin + nút
     if not is_allowed_user(uid):
         await m.answer(
             STRANGER_START_TEXT,
@@ -1119,6 +1238,79 @@ async def auto_del(c: types.CallbackQuery):
 
 
 # ======================
+# WEB ADMIN PANEL
+# ======================
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel(key: str = ""):
+    if not check_web_key(key):
+        return HTMLResponse("<h3>403 Forbidden</h3>", status_code=403)
+
+    async with SessionLocal() as db:
+        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
+
+    return HTMLResponse(render_admin_page(admins, key=key))
+
+
+@app.post("/admin/add", response_class=HTMLResponse)
+async def admin_add(
+    key: str = Form(""),
+    user_id: int = Form(...),
+    note: str = Form("")
+):
+    if not check_web_key(key):
+        return HTMLResponse("<h3>403 Forbidden</h3>", status_code=403)
+
+    if user_id == OWNER_ID:
+        return HTMLResponse("<h3>OWNER 已经是主控，不需要添加。</h3>")
+
+    async with SessionLocal() as db:
+        exists = (await db.execute(
+            select(AdminUser).where(AdminUser.user_id == user_id)
+        )).scalars().first()
+
+        if exists:
+            exists.note = note.strip()
+            await db.commit()
+        else:
+            db.add(AdminUser(
+                user_id=user_id,
+                note=note.strip(),
+                created_at=int(time.time())
+            ))
+            await db.commit()
+
+    await load_admin_cache()
+
+    async with SessionLocal() as db:
+        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
+
+    return HTMLResponse(render_admin_page(admins, key=key, msg="已添加/更新 ADMIN"))
+
+
+@app.post("/admin/delete", response_class=HTMLResponse)
+async def admin_delete(
+    key: str = Form(""),
+    user_id: int = Form(...)
+):
+    if not check_web_key(key):
+        return HTMLResponse("<h3>403 Forbidden</h3>", status_code=403)
+
+    if user_id == OWNER_ID:
+        return HTMLResponse("<h3>不能删除 OWNER</h3>")
+
+    async with SessionLocal() as db:
+        await db.execute(delete(AdminUser).where(AdminUser.user_id == user_id))
+        await db.commit()
+
+    await load_admin_cache()
+
+    async with SessionLocal() as db:
+        admins = (await db.execute(select(AdminUser).order_by(AdminUser.id.desc()))).scalars().all()
+
+    return HTMLResponse(render_admin_page(admins, key=key, msg="已删除 ADMIN"))
+
+
+# ======================
 # STATE HANDLER
 # ======================
 @dp.message()
@@ -1129,7 +1321,6 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
-    # 只有管理员/主人可以进入处理逻辑
     if not is_allowed_user(uid):
         return
 
@@ -1541,6 +1732,7 @@ async def startup():
     global worker_task
 
     await ensure_schema()
+    await load_admin_cache()
     worker_task = asyncio.create_task(auto_worker())
 
     webhook_url = f"{BASE_URL}/webhook"

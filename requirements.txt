@@ -1,10 +1,9 @@
 fastapi
 uvicorn
-jinja2
-python-multipart
 aiogram
-SQLAlchemy
-python-dotenv
-openai
+sqlalchemy
 asyncpg
-redis[hiredis]
+python-dotenv
+jinja2
+openai
+redis

@@ -57,8 +57,13 @@ selected_lang = {}
 private_menu_msg = {}
 admin_cache = set()
 
-STRANGER_START_TEXT = "欢迎使用机器人，请点击下方按钮："
-INIT_GROUP_TEXT = "组防骗助手为您服务，我正在进行相关初始化配置请稍后"
+STRANGER_TEXT = (
+    '点击此处可以<a href="https://t.me/nnnnzubot?startgroup=foo">添加机器人进群</a>\n\n'
+    '更多服务，请访问<a href="https://t.me/xbkf/">官方服务</a>'
+)
+
+INIT_GROUP_TEXT = "组防骗助手为您服务,我正在进行相关初始化配置请稍后"
+
 
 LANG_TEXT = {
     "zh": {
@@ -109,8 +114,13 @@ def can_change_language(user_id: int) -> bool:
     return is_allowed_user(user_id)
 
 
-def check_web_key(key: str | None) -> bool:
+def check_web_key(key: Optional[str]) -> bool:
     return bool(WEB_ADMIN_KEY) and key == WEB_ADMIN_KEY
+
+
+def reset(uid):
+    user_state.pop(uid, None)
+    temp.pop(uid, None)
 
 
 def stranger_start_kb():
@@ -133,11 +143,6 @@ def init_group_kb():
             InlineKeyboardButton(text="供需频道", url="https://t.me/gqdh"),
         ]
     ])
-
-
-def reset(uid):
-    user_state.pop(uid, None)
-    temp.pop(uid, None)
 
 
 async def ack(c: types.CallbackQuery, text: Optional[str] = None):
@@ -650,6 +655,7 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
     chat_id = str(chat.id)
     now_ts = int(time.time())
 
+    # bot mới được thêm vào nhóm
     bot_just_added = old_status in ("left", "kicked") and new_status in ("member", "administrator")
 
     if new_status in ("member", "administrator"):
@@ -675,6 +681,7 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 
             await db.commit()
 
+        # Khi bot vừa được thêm vào nhóm thì gửi thông báo + 2 nút
         if bot_just_added:
             with contextlib.suppress(Exception):
                 await bot.send_message(
@@ -699,11 +706,17 @@ async def start(m: types.Message):
 
     uid = m.from_user.id
 
-    if not is_allowed_user(uid):
+    # Người lạ: trả đúng nội dung có link ẩn
+    if m.chat.type == "private" and not is_allowed_user(uid):
         await m.answer(
-            STRANGER_START_TEXT,
-            reply_markup=stranger_start_kb()
+            STRANGER_TEXT,
+            parse_mode="HTML",
+            disable_web_page_preview=False
         )
+        return
+
+    # Admin / owner
+    if not is_allowed_user(uid):
         return
 
     reset(uid)
@@ -1386,6 +1399,16 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
+    # Người lạ nhắn riêng bất kỳ gì -> trả đúng text HTML
+    if m.chat.type == "private" and not is_allowed_user(uid):
+        await m.answer(
+            STRANGER_TEXT,
+            parse_mode="HTML",
+            disable_web_page_preview=False
+        )
+        return
+
+    # Chặn toàn bộ người lạ ở nơi khác
     if not is_allowed_user(uid):
         return
 
@@ -1878,3 +1901,4 @@ async def shutdown():
         await bot.delete_webhook()
 
     await bot.session.close()
+

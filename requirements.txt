@@ -2,7 +2,9 @@ fastapi
 uvicorn
 python-multipart
 aiogram
-sqlalchemy
-asyncpg
+SQLAlchemy
+aiosqlite
 python-dotenv
 openai
+jinja2
+asyncpg

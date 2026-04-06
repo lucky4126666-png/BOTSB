@@ -1,6 +1,7 @@
 fastapi
-uvicorn[standard]
-aiogram>=3.4.1
-sqlalchemy>=2.0
+uvicorn
+python-multipart
+aiogram
+sqlalchemy
 asyncpg
 python-dotenv

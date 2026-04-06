@@ -48,11 +48,13 @@ def reset(uid):
     temp.pop(uid, None)
 
 
+async def ack(c: types.CallbackQuery, text: str | None = None):
+    with contextlib.suppress(Exception):
+        await c.answer(text=text)
+
+
 # ======================
 # BUTTON PARSER
-# Format:
-# Nút - https://url.com && Nút 2 - https://url2.com
-# dòng mới = hàng mới
 # ======================
 def parse_buttons(text):
     if not text:
@@ -507,7 +509,7 @@ async def cancel(m: types.Message):
 
 @dp.callback_query(F.data == "back_start")
 async def back_start(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "🏠 Trang chủ", reply_markup=start_menu_kb())
 
 
@@ -516,25 +518,25 @@ async def back_start(c: types.CallbackQuery):
 # ======================
 @dp.callback_query(F.data == "admin_menu")
 async def admin_menu(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "👑 ADMIN + Cài đặt", reply_markup=admin_menu_kb())
 
 
 @dp.callback_query(F.data == "group_menu")
 async def group_menu(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "👥 NHÓM", reply_markup=group_menu_kb())
 
 
 @dp.callback_query(F.data == "lang_menu")
 async def lang_menu(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "🌐 Languages", reply_markup=lang_menu_kb())
 
 
 @dp.callback_query(F.data == "group_list")
 async def group_list(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     groups = await get_all_groups()
 
     kb = []
@@ -556,7 +558,7 @@ async def group_list(c: types.CallbackQuery):
 
 @dp.callback_query(F.data == "group_pick")
 async def group_pick(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     groups = await get_all_groups()
     if not groups:
         return await c.message.answer("Chưa có nhóm nào.")
@@ -565,7 +567,7 @@ async def group_pick(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("pick_group_"))
 async def pick_group(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     chat_id = c.data.replace("pick_group_", "")
     uid = c.from_user.id
 
@@ -587,14 +589,14 @@ async def pick_group(c: types.CallbackQuery):
 
 @dp.callback_query(F.data == "lang_vi")
 async def lang_vi(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     selected_lang[c.from_user.id] = "vi"
     await safe_edit(c.message, "✅ Đã chọn: Tiếng Việt", reply_markup=start_menu_kb())
 
 
 @dp.callback_query(F.data == "lang_en")
 async def lang_en(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     selected_lang[c.from_user.id] = "en"
     await safe_edit(c.message, "✅ Selected: English", reply_markup=start_menu_kb())
 
@@ -604,13 +606,13 @@ async def lang_en(c: types.CallbackQuery):
 # ======================
 @dp.callback_query(F.data == "kw_menu")
 async def kw_menu(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "📌 Từ khoá", reply_markup=kw_menu_kb())
 
 
 @dp.callback_query(F.data == "kw_add")
 async def kw_add(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     uid = c.from_user.id
     user_state[uid] = "kw_add_key"
     temp[uid] = {}
@@ -622,19 +624,19 @@ async def kw_add(c: types.CallbackQuery):
 
 @dp.callback_query(F.data == "kw_list")
 async def kw_list(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await show_kw_list(c.message)
 
 
 @dp.callback_query(F.data.startswith("kw_view_"))
 async def kw_view(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await show_kw_view(c.message, int(c.data.split("_")[-1]))
 
 
 @dp.callback_query(F.data.startswith("kw_toggle_"))
 async def kw_toggle(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         k = await db.get(Keyword, kid)
@@ -647,7 +649,7 @@ async def kw_toggle(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_mode_"))
 async def kw_mode(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         k = await db.get(Keyword, kid)
@@ -660,7 +662,7 @@ async def kw_mode(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_key_"))
 async def kw_key(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "kw_edit_key"
@@ -670,7 +672,7 @@ async def kw_key(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_text_"))
 async def kw_text(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "kw_edit_text"
@@ -680,7 +682,7 @@ async def kw_text(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_img_"))
 async def kw_img(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "kw_edit_image"
@@ -690,7 +692,7 @@ async def kw_img(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_btn_"))
 async def kw_btn(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "kw_edit_button"
@@ -704,7 +706,7 @@ async def kw_btn(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_pre_"))
 async def kw_pre(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     kid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         k = await db.get(Keyword, kid)
@@ -715,7 +717,7 @@ async def kw_pre(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("kw_del_"))
 async def kw_del(c: types.CallbackQuery):
-    await c.answer("Đã xoá")
+    await ack(c, "Đã xoá")
     kid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         await db.execute(delete(Keyword).where(Keyword.id == kid))
@@ -728,13 +730,13 @@ async def kw_del(c: types.CallbackQuery):
 # ======================
 @dp.callback_query(F.data == "wl_menu")
 async def wl_menu(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "👋 Chào mừng nhóm", reply_markup=wl_menu_kb())
 
 
 @dp.callback_query(F.data == "wl_add")
 async def wl_add(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     uid = c.from_user.id
     user_state[uid] = "wl_add_chat"
     temp[uid] = {}
@@ -743,19 +745,19 @@ async def wl_add(c: types.CallbackQuery):
 
 @dp.callback_query(F.data == "wl_list")
 async def wl_list(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await show_wl_list(c.message)
 
 
 @dp.callback_query(F.data.startswith("wl_view_"))
 async def wl_view(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await show_wl_view(c.message, int(c.data.split("_")[-1]))
 
 
 @dp.callback_query(F.data.startswith("wl_toggle_"))
 async def wl_toggle(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         w = await db.get(WelcomeSetting, wid)
@@ -768,7 +770,7 @@ async def wl_toggle(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_text_"))
 async def wl_text(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "wl_edit_text"
@@ -778,7 +780,7 @@ async def wl_text(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_img_"))
 async def wl_img(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "wl_edit_image"
@@ -788,7 +790,7 @@ async def wl_img(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_btn_"))
 async def wl_btn(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "wl_edit_button"
@@ -802,7 +804,7 @@ async def wl_btn(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_delmin_"))
 async def wl_delmin(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "wl_edit_delete_after"
@@ -812,7 +814,7 @@ async def wl_delmin(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_pre_"))
 async def wl_pre(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         w = await db.get(WelcomeSetting, wid)
@@ -823,7 +825,7 @@ async def wl_pre(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_del_"))
 async def wl_del(c: types.CallbackQuery):
-    await c.answer("Đã xoá")
+    await ack(c, "Đã xoá")
     wid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         await db.execute(delete(WelcomeSetting).where(WelcomeSetting.id == wid))
@@ -833,7 +835,7 @@ async def wl_del(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wl_pin_"))
 async def wl_pin(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     wid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         w = await db.get(WelcomeSetting, wid)
@@ -849,13 +851,13 @@ async def wl_pin(c: types.CallbackQuery):
 # ======================
 @dp.callback_query(F.data == "auto_menu")
 async def auto_menu(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await safe_edit(c.message, "📅 Auto Post", reply_markup=auto_menu_kb())
 
 
 @dp.callback_query(F.data == "auto_add")
 async def auto_add(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     uid = c.from_user.id
     user_state[uid] = "auto_add_chat"
     temp[uid] = {}
@@ -864,19 +866,19 @@ async def auto_add(c: types.CallbackQuery):
 
 @dp.callback_query(F.data == "auto_list")
 async def auto_list(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await show_auto_list(c.message)
 
 
 @dp.callback_query(F.data.startswith("auto_view_"))
 async def auto_view(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     await show_auto_view(c.message, int(c.data.split("_")[-1]))
 
 
 @dp.callback_query(F.data.startswith("auto_toggle_"))
 async def auto_toggle(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         p = await db.get(AutoPost, pid)
@@ -889,7 +891,7 @@ async def auto_toggle(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_pin_"))
 async def auto_pin(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         p = await db.get(AutoPost, pid)
@@ -902,7 +904,7 @@ async def auto_pin(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_text_"))
 async def auto_text(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_text"
@@ -912,7 +914,7 @@ async def auto_text(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_img_"))
 async def auto_img(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_image"
@@ -922,7 +924,7 @@ async def auto_img(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_btn_"))
 async def auto_btn(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_button"
@@ -936,7 +938,7 @@ async def auto_btn(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_chat_"))
 async def auto_chat(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_chat"
@@ -946,7 +948,7 @@ async def auto_chat(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_int_"))
 async def auto_int(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_interval"
@@ -956,7 +958,7 @@ async def auto_int(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_start_"))
 async def auto_start(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_start"
@@ -966,7 +968,7 @@ async def auto_start(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_end_"))
 async def auto_end(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     uid = c.from_user.id
     user_state[uid] = "auto_edit_end"
@@ -976,7 +978,7 @@ async def auto_end(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_pre_"))
 async def auto_pre(c: types.CallbackQuery):
-    await c.answer()
+    await ack(c)
     pid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         p = await db.get(AutoPost, pid)
@@ -987,7 +989,7 @@ async def auto_pre(c: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("auto_del_"))
 async def auto_del(c: types.CallbackQuery):
-    await c.answer("Đã xoá")
+    await ack(c, "Đã xoá")
     pid = int(c.data.split("_")[-1])
     async with SessionLocal() as db:
         await db.execute(delete(AutoPost).where(AutoPost.id == pid))

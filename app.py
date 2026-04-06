@@ -129,7 +129,16 @@ engine = create_async_engine(
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
+redis_client = (
+    redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+        retry_on_timeout=True,
+    )
+    if REDIS_URL else None
+)
 
 worker_task = None
 

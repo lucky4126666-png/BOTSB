@@ -1843,17 +1843,20 @@ async def health():
 
 @app.post("/webhook")
 async def webhook(req: Request):
-    data = await req.json()
-    print("[WEBHOOK UPDATE]", data)
+    try:
+        data = await req.json()
+        print("[WEBHOOK RAW]", data)
 
-    update = types.Update.model_validate(data)
-    await dp.feed_update(bot, update)
-    return {"ok": True}
+        update = types.Update.model_validate(data)
+        print("[WEBHOOK PARSED]", update.model_dump())
 
-async def ensure_schema():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await dp.feed_update(bot, update)
+        print("[WEBHOOK OK]")
+        return {"ok": True}
 
+    except Exception as e:
+        print("[WEBHOOK ERROR]", repr(e))
+        return {"ok": False, "error": str(e)}
 
 @app.on_event("startup")
 async def startup():

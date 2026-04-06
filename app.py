@@ -1408,7 +1408,7 @@ async def ensure_schema():
         await conn.run_sync(Base.metadata.create_all)
 
 
-@app.on_event("startup")
+@@app.on_event("startup")
 async def startup():
     global worker_task
 
@@ -1424,11 +1424,12 @@ async def startup():
         print("[STARTUP] old webhook deleted")
 
         result = await bot.set_webhook(
-    webhook_url,
-    drop_pending_updates=True,
-    allowed_updates=["message", "callback_query", "my_chat_member"]
-)
-print("[STARTUP] set_webhook result =", result)
+            webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query", "my_chat_member"]
+        )
+        print("[STARTUP] set_webhook result =", result)
+
         info = await bot.get_webhook_info()
         print("[STARTUP] webhook info =", info.model_dump())
 

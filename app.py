@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
@@ -700,14 +701,15 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 # ======================
 # START / HOME
 # ======================
-@dp.message(F.text.startswith("/start"))
+@dp.message(CommandStart())
 async def start(m: types.Message):
     if not m.from_user:
         return
 
     uid = m.from_user.id
-    print("[START]", uid, m.chat.type, m.text)
+    print("[START HANDLER]", uid, m.chat.type, m.text)
 
+    # Người lạ private -> trả text HTML
     if m.chat.type == "private" and not is_allowed_user(uid):
         await m.answer(
             STRANGER_TEXT,
@@ -744,6 +746,7 @@ async def start(m: types.Message):
         return
 
     await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
+
 
 @dp.message(F.text == "/cancel")
 async def cancel(m: types.Message):
@@ -1399,9 +1402,11 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
 
-    print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
-
+    # Người lạ nhắn riêng bất kỳ gì (không phải command) -> trả đúng text HTML
+    text_ = (m.text or m.caption or "").strip()
     if m.chat.type == "private" and not is_allowed_user(uid):
+        if not text_ or text_.startswith("/"):
+            return
         await m.answer(
             STRANGER_TEXT,
             parse_mode="HTML",
@@ -1409,10 +1414,6 @@ async def all_messages(m: types.Message):
         )
         return
 
-    if not is_allowed_user(uid):
-        return
-
-    # Chặn toàn bộ người lạ ở nơi khác
     if not is_allowed_user(uid):
         return
 
@@ -1699,7 +1700,6 @@ async def all_messages(m: types.Message):
         return await m.answer("结束时间已更新。", reply_markup=start_menu_kb(uid))
 
     # ---- KEYWORD AUTO REPLY ----
-    text_ = (m.text or m.caption or "").strip()
     if not text_ or text_.startswith("/"):
         return
 
@@ -1858,6 +1858,12 @@ async def webhook(req: Request):
         print("[WEBHOOK ERROR]", repr(e))
         return {"ok": False, "error": str(e)}
 
+
+async def ensure_schema():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
 @app.on_event("startup")
 async def startup():
     global worker_task
@@ -1883,6 +1889,9 @@ async def startup():
 
         info = await bot.get_webhook_info()
         print("[STARTUP] webhook info =", info.model_dump())
+        print("[WEBHOOK INFO URL]", info.url)
+        print("[WEBHOOK INFO PENDING]", info.pending_update_count)
+        print("[WEBHOOK INFO LAST ERROR]", info.last_error_message)
 
         if not info.url:
             print("[ERROR] Webhook chưa được set. Hãy kiểm tra BASE_URL hoặc URL HTTPS public.")

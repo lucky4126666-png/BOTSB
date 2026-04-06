@@ -720,6 +720,8 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 # ======================
 @dp.message(F.text.startswith("/start"))
 async def start(m: types.Message):
+    print("[START HIT]", m.from_user.id, m.text)
+    await m.answer("Bot đang hoạt động.")
     if not m.from_user:
         return
 
@@ -1732,10 +1734,10 @@ async def health():
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
-    print("[WEBHOOK UPDATE RAW]", data)
+    print("[WEBHOOK RAW]", data)
 
     update = types.Update.model_validate(data)
-    print("[WEBHOOK UPDATE TYPE]", update.event_type)
+    print("[WEBHOOK TYPE]", update.event_type)
 
     await dp.feed_update(bot, update)
     return {"ok": True}

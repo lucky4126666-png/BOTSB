@@ -60,11 +60,6 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 @pass_context
 def _jinja_url_for(context, name: str, **path_params):
-    """
-    - url_for('dashboard')
-    - url_for('static', filename='style.css')
-    - Tự động gắn ?key=WEB_ADMIN_KEY cho các trang admin khi đã login
-    """
     request: Request = context["request"]
 
     if "filename" in path_params and "path" not in path_params:
@@ -232,6 +227,7 @@ async def allowed_or_ignore(c: types.CallbackQuery):
 # ======================
 # BUTTON PARSER
 # ======================
+
 def parse_buttons(text):
     if not text:
         return None
@@ -320,6 +316,7 @@ def parse_dt(s: str):
 # ======================
 # MODELS
 # ======================
+
 class Keyword(Base):
     __tablename__ = "keywords"
     id = Column(Integer, primary_key=True)
@@ -379,6 +376,7 @@ class AdminUser(Base):
 # ======================
 # MENUS
 # ======================
+
 def start_menu_kb(uid: Optional[int] = None):
     kb = [
         [InlineKeyboardButton(text="👑 管理员设置", callback_data="admin_menu")],
@@ -459,6 +457,7 @@ def auto_menu_kb():
 # ======================
 # HELPERS
 # ======================
+
 async def load_admin_cache():
     global admin_cache
     async with SessionLocal() as db:
@@ -650,6 +649,7 @@ async def show_auto_view(message, pid):
 # ======================
 # TRACK BOT IN GROUP
 # ======================
+
 @dp.my_chat_member()
 async def track_bot_membership(event: types.ChatMemberUpdated):
     chat = event.chat
@@ -690,7 +690,6 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
             await db.commit()
 
         if bot_just_added:
-            print("[MY_CHAT_MEMBER] bot just added -> sending init message")
             with contextlib.suppress(Exception):
                 await bot.send_message(
                     chat_id=chat.id,
@@ -707,6 +706,7 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
 # ======================
 # START / HOME
 # ======================
+
 @dp.message(CommandStart())
 async def start(m: types.Message):
     if not m.from_user:
@@ -781,6 +781,7 @@ async def back_start(c: types.CallbackQuery):
 # ======================
 # MAIN MENU
 # ======================
+
 @dp.callback_query(F.data == "admin_menu")
 async def admin_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
@@ -799,7 +800,6 @@ async def group_menu(c: types.CallbackQuery):
 async def lang_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    print("[LANG MENU]", c.from_user.id, is_allowed_user(c.from_user.id))
     await safe_edit(c.message, t(c.from_user.id, "lang_title"), reply_markup=lang_menu_kb())
 
 
@@ -888,6 +888,7 @@ async def lang_zh(c: types.CallbackQuery):
 # ======================
 # KEYWORD MENU
 # ======================
+
 @dp.callback_query(F.data == "kw_menu")
 async def kw_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
@@ -1025,6 +1026,7 @@ async def kw_del(c: types.CallbackQuery):
 # ======================
 # WELCOME MENU
 # ======================
+
 @dp.callback_query(F.data == "wl_menu")
 async def wl_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
@@ -1159,6 +1161,7 @@ async def wl_pin(c: types.CallbackQuery):
 # ======================
 # AUTO MENU
 # ======================
+
 @dp.callback_query(F.data == "auto_menu")
 async def auto_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
@@ -1324,8 +1327,9 @@ async def auto_del(c: types.CallbackQuery):
 
 
 # ======================
-# WEB ADMIN TEMPLATES
+# WEB ADMIN
 # ======================
+
 @app.get("/admin", response_class=HTMLResponse, name="admin_root")
 async def admin_root(request: Request, key: str = ""):
     if web_authenticated(key):
@@ -1342,7 +1346,7 @@ async def admin_login_page(request: Request, key: str = ""):
         return web_redirect(request, "dashboard", key=key)
     return templates.TemplateResponse(
         "login.html",
-        web_base_context(request, active_page="login", admin_key="", error="")
+        web_base_context(request, active_page="login", admin_key="")
     )
 
 
@@ -1350,7 +1354,6 @@ async def admin_login_page(request: Request, key: str = ""):
 async def admin_login_submit(request: Request, key: str = Form("")):
     if web_authenticated(key):
         return web_redirect(request, "dashboard", key=key)
-
     return templates.TemplateResponse(
         "login.html",
         web_base_context(
@@ -1594,6 +1597,7 @@ async def admin_auto(request: Request, key: str = ""):
 # ======================
 # STATE HANDLER
 # ======================
+
 @dp.message()
 async def all_messages(m: types.Message):
     if not m.from_user:
@@ -1601,7 +1605,6 @@ async def all_messages(m: types.Message):
 
     uid = m.from_user.id
     state = user_state.get(uid)
-
     text_ = (m.text or m.caption or "").strip()
 
     if m.chat.type == "private" and not is_allowed_user(uid):
@@ -1650,7 +1653,6 @@ async def all_messages(m: types.Message):
             answer = resp.choices[0].message.content or " "
             reset(uid)
             return await m.answer(answer, reply_markup=start_menu_kb(uid))
-
         except Exception as e:
             print("[OPENAI ERROR]", e)
             reset(uid)
@@ -1935,13 +1937,12 @@ async def all_messages(m: types.Message):
             image=matched.image,
             button=matched.button
         )
-    else:
-        print("[KW NO MATCH]")
 
 
 # ======================
 # WELCOME NEW MEMBER
 # ======================
+
 @dp.message(F.new_chat_members)
 async def welcome_new_member(m: types.Message):
     if not m.chat:
@@ -1982,6 +1983,7 @@ async def welcome_new_member(m: types.Message):
 # ======================
 # AUTO WORKER
 # ======================
+
 async def auto_worker():
     while True:
         try:
@@ -2031,6 +2033,7 @@ async def auto_worker():
 # ======================
 # FASTAPI
 # ======================
+
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -2123,4 +2126,3 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

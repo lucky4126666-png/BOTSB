@@ -16,6 +16,7 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, Integer, String, Text, select, delete
 
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 
 load_dotenv()
 
@@ -34,6 +35,10 @@ ADMIN_IDS = {
     if x.strip().isdigit()
 }
 WEB_ADMIN_KEY = os.getenv("WEB_ADMIN_KEY", "")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -54,6 +59,46 @@ admin_cache = set()
 
 STRANGER_START_TEXT = "欢迎使用机器人，请点击下方按钮："
 INIT_GROUP_TEXT = "组防骗助手为您服务，我正在进行相关初始化配置请稍后"
+
+LANG_TEXT = {
+    "zh": {
+        "home": "🏠 首页",
+        "admin": "👑 管理员设置",
+        "group": "👥 群组管理",
+        "lang": "🌐 语言",
+        "lang_title": "🌐 语言",
+        "lang_vi_ok": "✅ 已选择：越南语",
+        "lang_zh_ok": "✅ 已选择：中文",
+        "ai_menu": "🤖 OpenAI",
+        "ai_prompt": "请输入要让 AI 回复的内容：",
+        "ai_wait": "正在思考，请稍候...",
+        "ai_missing": "未配置 OpenAI API。",
+        "ai_error": "AI 处理失败。",
+    },
+    "vi": {
+        "home": "🏠 Trang chủ",
+        "admin": "👑 Cài đặt quản trị",
+        "group": "👥 Quản lý nhóm",
+        "lang": "🌐 Ngôn ngữ",
+        "lang_title": "🌐 Ngôn ngữ",
+        "lang_vi_ok": "✅ Đã chọn: Tiếng Việt",
+        "lang_zh_ok": "✅ Đã chọn: Tiếng Trung",
+        "ai_menu": "🤖 OpenAI",
+        "ai_prompt": "Nhập nội dung bạn muốn AI trả lời:",
+        "ai_wait": "Đang suy nghĩ, vui lòng chờ...",
+        "ai_missing": "Chưa cấu hình OpenAI API.",
+        "ai_error": "Xử lý AI thất bại.",
+    }
+}
+
+
+def get_lang(uid: int) -> str:
+    return selected_lang.get(uid, "zh")
+
+
+def t(uid: int, key: str) -> str:
+    lang = get_lang(uid)
+    return LANG_TEXT.get(lang, LANG_TEXT["zh"]).get(key, key)
 
 
 def is_allowed_user(user_id: int) -> bool:
@@ -122,12 +167,12 @@ def parse_buttons(text):
             if not part:
                 continue
             if " - " in part:
-                t, u = part.split(" - ", 1)
+                t_, u = part.split(" - ", 1)
             elif "-" in part:
-                t, u = part.split("-", 1)
+                t_, u = part.split("-", 1)
             else:
                 continue
-            row.append({"text": t.strip(), "url": u.strip()})
+            row.append({"text": t_.strip(), "url": u.strip()})
         if row:
             rows.append(row)
 
@@ -264,6 +309,7 @@ def start_menu_kb(uid: Optional[int] = None):
     ]
     if uid is not None and can_change_language(uid):
         kb.append([InlineKeyboardButton(text="🌐 语言", callback_data="lang_menu")])
+        kb.append([InlineKeyboardButton(text="🤖 OpenAI", callback_data="ai_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -273,6 +319,7 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="👋 群组欢迎", callback_data="wl_menu")],
         [InlineKeyboardButton(text="📅 定时发送", callback_data="auto_menu")],
         [InlineKeyboardButton(text="🌐 语言", callback_data="lang_menu")],
+        [InlineKeyboardButton(text="🤖 OpenAI", callback_data="ai_menu")],
         [InlineKeyboardButton(text="⬅️ 返回", callback_data="back_start")],
     ])
 
@@ -652,7 +699,6 @@ async def start(m: types.Message):
 
     uid = m.from_user.id
 
-    # Người lạ: chỉ hiện 1 tin + nút bấm
     if not is_allowed_user(uid):
         await m.answer(
             STRANGER_START_TEXT,
@@ -670,12 +716,12 @@ async def start(m: types.Message):
                 await bot.edit_message_text(
                     chat_id=m.chat.id,
                     message_id=old_msg_id,
-                    text="🏠 首页",
+                    text=t(uid, "home"),
                     reply_markup=start_menu_kb(uid)
                 )
             return
 
-        msg = await m.answer("🏠 首页", reply_markup=start_menu_kb(uid))
+        msg = await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
         private_menu_msg[uid] = msg.message_id
         return
 
@@ -684,7 +730,7 @@ async def start(m: types.Message):
         await m.answer("👥 请选择要管理的群组：", reply_markup=group_select_kb(groups))
         return
 
-    await m.answer("🏠 首页", reply_markup=start_menu_kb(uid))
+    await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
 
 
 @dp.message(F.text == "/cancel")
@@ -695,11 +741,21 @@ async def cancel(m: types.Message):
     await m.answer("已取消操作。", reply_markup=start_menu_kb(m.from_user.id))
 
 
+@dp.message(F.text == "/ai")
+async def ai_cmd(m: types.Message):
+    if not m.from_user or not is_allowed_user(m.from_user.id):
+        return
+    uid = m.from_user.id
+    user_state[uid] = "ai_prompt"
+    temp[uid] = {}
+    await m.answer(t(uid, "ai_prompt"))
+
+
 @dp.callback_query(F.data == "back_start")
 async def back_start(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    await safe_edit(c.message, "🏠 首页", reply_markup=start_menu_kb(c.from_user.id))
+    await safe_edit(c.message, t(c.from_user.id, "home"), reply_markup=start_menu_kb(c.from_user.id))
 
 
 # ======================
@@ -723,7 +779,17 @@ async def group_menu(c: types.CallbackQuery):
 async def lang_menu(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
-    await safe_edit(c.message, "🌐 语言", reply_markup=lang_menu_kb())
+    await safe_edit(c.message, t(c.from_user.id, "lang_title"), reply_markup=lang_menu_kb())
+
+
+@dp.callback_query(F.data == "ai_menu")
+async def ai_menu(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    uid = c.from_user.id
+    user_state[uid] = "ai_prompt"
+    temp[uid] = {}
+    await c.message.answer(t(uid, "ai_prompt"))
 
 
 @dp.callback_query(F.data == "group_list")
@@ -777,7 +843,7 @@ async def pick_group(c: types.CallbackQuery):
 
     await safe_edit(
         c.message,
-        f"✅ 已选择群组：\n{title}\n\n🏠 首页",
+        f"✅ 已选择群组：\n{title}\n\n{t(uid, 'home')}",
         reply_markup=start_menu_kb(uid)
     )
 
@@ -787,7 +853,7 @@ async def lang_vi(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     selected_lang[c.from_user.id] = "vi"
-    await safe_edit(c.message, "✅ 已选择：越南语", reply_markup=start_menu_kb(c.from_user.id))
+    await safe_edit(c.message, t(c.from_user.id, "lang_vi_ok"), reply_markup=start_menu_kb(c.from_user.id))
 
 
 @dp.callback_query(F.data == "lang_zh")
@@ -795,7 +861,7 @@ async def lang_zh(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
     selected_lang[c.from_user.id] = "zh"
-    await safe_edit(c.message, "✅ 已选择：中文", reply_markup=start_menu_kb(c.from_user.id))
+    await safe_edit(c.message, t(c.from_user.id, "lang_zh_ok"), reply_markup=start_menu_kb(c.from_user.id))
 
 
 # ======================
@@ -1324,6 +1390,43 @@ async def all_messages(m: types.Message):
         return
 
     print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
+
+    # ---- AI ----
+    if state == "ai_prompt":
+        if not openai_client:
+            reset(uid)
+            return await m.answer(t(uid, "ai_missing"), reply_markup=start_menu_kb(uid))
+
+        prompt = (m.text or m.caption or "").strip()
+        if not prompt:
+            return await m.answer("请输入文本。")
+
+        try:
+            await m.answer(t(uid, "ai_wait"))
+
+            sys_prompt = (
+                "请用中文简洁回答。"
+                if get_lang(uid) == "zh"
+                else "Hãy trả lời bằng tiếng Việt ngắn gọn, rõ ràng."
+            )
+
+            resp = await openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7
+            )
+
+            answer = resp.choices[0].message.content or " "
+            reset(uid)
+            return await m.answer(answer, reply_markup=start_menu_kb(uid))
+
+        except Exception as e:
+            print("[OPENAI ERROR]", e)
+            reset(uid)
+            return await m.answer(t(uid, "ai_error"), reply_markup=start_menu_kb(uid))
 
     # ---- KEYWORD ----
     if state == "kw_add_key":

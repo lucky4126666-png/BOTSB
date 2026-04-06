@@ -9,7 +9,6 @@ from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.middleware.sessions import SessionMiddleware
 from jinja2 import pass_context
 
 from aiogram import Bot, Dispatcher, F, types
@@ -55,11 +54,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET", "change-this-session-secret")
-)
-
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -67,17 +61,25 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 @pass_context
 def _jinja_url_for(context, name: str, **path_params):
     """
-    Hỗ trợ cả:
     - url_for('dashboard')
-    - url_for('static', filename='style.css')  (Flask style)
-    - url_for('static', path='style.css')      (FastAPI style)
+    - url_for('static', filename='style.css')
+    - Tự động gắn ?key=WEB_ADMIN_KEY cho các trang admin khi đã login
     """
     request: Request = context["request"]
 
     if "filename" in path_params and "path" not in path_params:
         path_params["path"] = path_params.pop("filename")
 
-    return request.url_for(name, **path_params)
+    url = request.url_for(name, **path_params)
+
+    admin_key = context.get("admin_key", "")
+    if admin_key and name not in ("static", "login", "login_post"):
+        try:
+            url = url.include_query_params(key=admin_key)
+        except Exception:
+            pass
+
+    return url
 
 
 templates.env.globals["url_for"] = _jinja_url_for
@@ -164,20 +166,26 @@ def check_web_key(key: Optional[str]) -> bool:
     return bool(WEB_ADMIN_KEY) and key == WEB_ADMIN_KEY
 
 
-def web_authenticated(request: Request, key: str = "") -> bool:
-    if request.session.get("web_admin"):
-        return True
-    if key and check_web_key(key):
-        request.session["web_admin"] = True
-        return True
-    return False
+def web_authenticated(key: str = "") -> bool:
+    return check_web_key(key)
 
 
-def web_base_context(request: Request, active_page: str = "", **kwargs):
+def web_redirect(request: Request, name: str, key: str = ""):
+    url = request.url_for(name)
+    if key and name not in ("login", "login_post", "static"):
+        try:
+            url = url.include_query_params(key=key)
+        except Exception:
+            pass
+    return RedirectResponse(url=str(url), status_code=303)
+
+
+def web_base_context(request: Request, active_page: str = "", admin_key: str = "", **kwargs):
     return {
         "request": request,
         "active_page": active_page,
         "current_year": datetime.now().year,
+        "admin_key": admin_key,
         **kwargs
     }
 
@@ -707,7 +715,6 @@ async def start(m: types.Message):
     uid = m.from_user.id
     print("[START HANDLER]", uid, m.chat.type, m.text)
 
-    # Người lạ private -> trả text HTML
     if m.chat.type == "private" and not is_allowed_user(uid):
         await m.answer(
             STRANGER_TEXT,
@@ -1317,53 +1324,54 @@ async def auto_del(c: types.CallbackQuery):
 
 
 # ======================
-# WEB ADMIN TEMPLATE ROUTES
+# WEB ADMIN TEMPLATES
 # ======================
 @app.get("/admin", response_class=HTMLResponse, name="admin_root")
 async def admin_root(request: Request, key: str = ""):
-    if web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("dashboard"), status_code=303)
+    if web_authenticated(key):
+        return web_redirect(request, "dashboard", key=key)
     return templates.TemplateResponse(
         "login.html",
-        web_base_context(request, active_page="login")
+        web_base_context(request, active_page="login", admin_key="")
     )
 
 
 @app.get("/admin/login", response_class=HTMLResponse, name="login")
 async def admin_login_page(request: Request, key: str = ""):
-    if web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("dashboard"), status_code=303)
+    if web_authenticated(key):
+        return web_redirect(request, "dashboard", key=key)
     return templates.TemplateResponse(
         "login.html",
-        web_base_context(request, active_page="login")
+        web_base_context(request, active_page="login", admin_key="", error="")
     )
 
 
 @app.post("/admin/login", response_class=HTMLResponse, name="login_post")
 async def admin_login_submit(request: Request, key: str = Form("")):
-    if web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("dashboard"), status_code=303)
+    if web_authenticated(key):
+        return web_redirect(request, "dashboard", key=key)
+
     return templates.TemplateResponse(
         "login.html",
         web_base_context(
             request,
             active_page="login",
-            error="Invalid key"
+            admin_key="",
+            error="Sai WEB_ADMIN_KEY hoặc key không hợp lệ."
         ),
         status_code=401
     )
 
 
 @app.get("/admin/logout", response_class=HTMLResponse, name="logout")
-async def admin_logout(request: Request):
-    request.session.clear()
-    return RedirectResponse(url=request.url_for("login"), status_code=303)
+async def admin_logout(request: Request, key: str = ""):
+    return web_redirect(request, "login")
 
 
 @app.get("/admin/dashboard", response_class=HTMLResponse, name="dashboard")
 async def admin_dashboard(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     admins, groups, keywords, welcomes, autos = await fetch_web_data()
     allowed_ids = allowed_admin_ids()
@@ -1447,6 +1455,7 @@ async def admin_dashboard(request: Request, key: str = ""):
         web_base_context(
             request,
             active_page="dashboard",
+            admin_key=key,
             stats=stats,
             recent_logs=recent_logs,
             system_info=system_info,
@@ -1456,24 +1465,23 @@ async def admin_dashboard(request: Request, key: str = ""):
 
 @app.get("/admin/logs", response_class=HTMLResponse, name="logs")
 async def admin_logs(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
-
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
     return templates.TemplateResponse(
         "logs.html",
-        web_base_context(request, active_page="logs")
+        web_base_context(request, active_page="logs", admin_key=key)
     )
 
 
 @app.get("/admin/admins", response_class=HTMLResponse, name="admins")
 async def admin_admins(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     admins, groups, keywords, welcomes, autos = await fetch_web_data()
     return templates.TemplateResponse(
         "admins.html",
-        web_base_context(request, active_page="admins", admins=admins)
+        web_base_context(request, active_page="admins", admin_key=key, admins=admins)
     )
 
 
@@ -1484,8 +1492,8 @@ async def admin_admins_add(
     note: str = Form(""),
     key: str = Form("")
 ):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     if user_id == OWNER_ID:
         raise HTTPException(status_code=400, detail="不能添加 OWNER")
@@ -1506,7 +1514,7 @@ async def admin_admins_add(
         await db.commit()
 
     await load_admin_cache()
-    return RedirectResponse(url=request.url_for("admins"), status_code=303)
+    return web_redirect(request, "admins", key=key)
 
 
 @app.post("/admin/admins/delete", response_class=HTMLResponse, name="admins_delete")
@@ -1515,8 +1523,8 @@ async def admin_admins_delete(
     user_id: int = Form(...),
     key: str = Form("")
 ):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     if user_id == OWNER_ID:
         raise HTTPException(status_code=400, detail="不能删除 OWNER")
@@ -1526,60 +1534,60 @@ async def admin_admins_delete(
         await db.commit()
 
     await load_admin_cache()
-    return RedirectResponse(url=request.url_for("admins"), status_code=303)
+    return web_redirect(request, "admins", key=key)
 
 
 @app.get("/admin/groups", response_class=HTMLResponse, name="groups")
 async def admin_groups(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     groups = await get_all_groups()
     return templates.TemplateResponse(
         "groups.html",
-        web_base_context(request, active_page="groups", groups=groups)
+        web_base_context(request, active_page="groups", admin_key=key, groups=groups)
     )
 
 
 @app.get("/admin/keywords", response_class=HTMLResponse, name="keywords")
 async def admin_keywords(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     async with SessionLocal() as db:
         keywords = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
 
     return templates.TemplateResponse(
         "keywords.html",
-        web_base_context(request, active_page="keywords", keywords=keywords)
+        web_base_context(request, active_page="keywords", admin_key=key, keywords=keywords)
     )
 
 
 @app.get("/admin/welcome", response_class=HTMLResponse, name="welcome")
 async def admin_welcome(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     async with SessionLocal() as db:
         welcomes = (await db.execute(select(WelcomeSetting).order_by(WelcomeSetting.id.desc()))).scalars().all()
 
     return templates.TemplateResponse(
         "welcome.html",
-        web_base_context(request, active_page="welcome", welcomes=welcomes)
+        web_base_context(request, active_page="welcome", admin_key=key, welcomes=welcomes)
     )
 
 
 @app.get("/admin/auto", response_class=HTMLResponse, name="auto")
 async def admin_auto(request: Request, key: str = ""):
-    if not web_authenticated(request, key):
-        return RedirectResponse(url=request.url_for("login"), status_code=303)
+    if not web_authenticated(key):
+        return web_redirect(request, "login")
 
     async with SessionLocal() as db:
         autos = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
 
     return templates.TemplateResponse(
         "auto.html",
-        web_base_context(request, active_page="auto", autos=autos)
+        web_base_context(request, active_page="auto", admin_key=key, autos=autos)
     )
 
 
@@ -1596,7 +1604,6 @@ async def all_messages(m: types.Message):
 
     text_ = (m.text or m.caption or "").strip()
 
-    # Người lạ nhắn riêng bất kỳ gì (không phải command) -> trả đúng text HTML
     if m.chat.type == "private" and not is_allowed_user(uid):
         if not text_ or text_.startswith("/"):
             return
@@ -2116,3 +2123,4 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+

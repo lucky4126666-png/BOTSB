@@ -1,1 +1,43 @@
+html
+{% extends "base.html" %}
 
+{% block title %}Keywords{% endblock %}
+{% block page_title %}Keywords{% endblock %}
+{% block page_subtitle %}Danh sách keyword auto reply{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Keyword List</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Key</th>
+          <th>Mode</th>
+          <th>Active</th>
+          <th>Text</th>
+          <th>Image</th>
+          <th>Button</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in keywords %}
+        <tr>
+          <td>{{ k.id }}</td>
+          <td>{{ k.key }}</td>
+          <td>{{ k.mode }}</td>
+          <td>{{ "✅" if k.active else "❌" }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ k.text }}</td>
+          <td class="text-truncate" style="max-width:160px">{{ k.image }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ k.button }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

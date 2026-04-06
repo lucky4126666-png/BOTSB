@@ -1330,22 +1330,25 @@ async def start(m: types.Message):
         )
         return
 
-    if not is_allowed_user(uid) and m.chat.type == "private":
-        return
-
     reset(uid)
 
     if m.chat.type == "private":
         old_msg_id = private_menu_msg.get(uid)
+        edited = False
 
         if old_msg_id:
-            with contextlib.suppress(Exception):
+            try:
                 await bot.edit_message_text(
                     chat_id=m.chat.id,
                     message_id=old_msg_id,
                     text=t(uid, "home"),
                     reply_markup=start_menu_kb(uid)
                 )
+                edited = True
+            except Exception as e:
+                print("[START EDIT OLD MENU ERROR]", e)
+
+        if edited:
             return
 
         msg = await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
@@ -1360,6 +1363,11 @@ async def start(m: types.Message):
     if is_allowed_user(uid):
         await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
 
+@dp.message(Command("ping"))
+async def ping_cmd(m: types.Message):
+    print("[PING RECEIVED]", m.from_user.id if m.from_user else None, m.chat.id)
+    await m.answer("pong")
+        
 
 @dp.message(F.text == "/cancel")
 async def cancel(m: types.Message):
@@ -3264,6 +3272,10 @@ async def webhook(req: Request):
         await dp.feed_update(bot, update)
         print("[WEBHOOK OK]")
         return {"ok": True}
+
+    except Exception as e:
+        print("[WEBHOOK ERROR]", repr(e))
+        return {"ok": False, "error": str(e)}
 
     except Exception as e:
         print("[WEBHOOK ERROR]", repr(e))

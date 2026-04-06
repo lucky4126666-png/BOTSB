@@ -6,9 +6,12 @@ import contextlib
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, Integer, String, Text, select, delete
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -58,15 +61,20 @@ def parse_buttons(text):
         row = []
         for part in line.split("&&"):
             part = part.strip()
+            if not part:
+                continue
+
             if " - " in part:
                 t, u = part.split(" - ", 1)
             elif "-" in part:
                 t, u = part.split("-", 1)
             else:
                 continue
+
             row.append({"text": t.strip(), "url": u.strip()})
         if row:
             rows.append(row)
+
     return rows or None
 
 def build_buttons(data):
@@ -127,8 +135,17 @@ def auto_menu_kb():
 # ======================
 # HELPERS
 # ======================
+async def safe_edit(message: types.Message, text: str, reply_markup=None):
+    try:
+        return await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest:
+        return await message.answer(text, reply_markup=reply_markup)
+    except Exception:
+        return await message.answer(text, reply_markup=reply_markup)
+
 async def send_preview(chat_id, text=None, image=None, button=None):
     kb = build_buttons(parse_buttons(button))
+
     if image:
         return await bot.send_photo(
             chat_id=chat_id,
@@ -136,6 +153,7 @@ async def send_preview(chat_id, text=None, image=None, button=None):
             caption=text or "",
             reply_markup=kb
         )
+
     return await bot.send_message(
         chat_id=chat_id,
         text=text or " ",
@@ -148,6 +166,96 @@ def extract_image_from_message(m: types.Message):
     if m.text:
         return m.text.strip()
     return None
+
+async def show_kw_list(message: types.Message):
+    async with SessionLocal() as db:
+        kws = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
+
+    kb = []
+    for k in kws:
+        kb.append([
+            InlineKeyboardButton(text=k.key, callback_data=f"kw_view_{k.id}"),
+            InlineKeyboardButton(text="❌", callback_data=f"kw_del_{k.id}")
+        ])
+    kb.append([InlineKeyboardButton(text="🔙", callback_data="kw_menu")])
+
+    await safe_edit(
+        message,
+        "Danh sách keyword" if kws else "Chưa có keyword nào.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+async def show_kw_view(message: types.Message, kid: int):
+    async with SessionLocal() as db:
+        k = await db.get(Keyword, kid)
+
+    if not k:
+        return await message.answer("Keyword không tồn tại.")
+
+    await safe_edit(
+        message,
+        f"Keyword: {k.key}\n"
+        f"Text: {'Có' if k.text else 'Trống'}\n"
+        f"Ảnh: {'Có' if k.image else 'Không'}\n"
+        f"Nút: {'Có' if k.button else 'Không'}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Text", callback_data=f"kw_text_{k.id}")],
+            [InlineKeyboardButton(text="🖼 Ảnh", callback_data=f"kw_img_{k.id}")],
+            [InlineKeyboardButton(text="🔘 Nút", callback_data=f"kw_btn_{k.id}")],
+            [InlineKeyboardButton(text="👁 Preview", callback_data=f"kw_pre_{k.id}")],
+            [InlineKeyboardButton(text="❌ Xoá", callback_data=f"kw_del_{k.id}")],
+            [InlineKeyboardButton(text="🔙", callback_data="kw_list")]
+        ])
+    )
+
+async def show_auto_list(message: types.Message):
+    async with SessionLocal() as db:
+        posts = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
+
+    kb = []
+    for p in posts:
+        kb.append([
+            InlineKeyboardButton(
+                text=f"Post {p.id} ({'ON' if p.is_active else 'OFF'})",
+                callback_data=f"auto_view_{p.id}"
+            ),
+            InlineKeyboardButton(text="❌", callback_data=f"auto_del_{p.id}")
+        ])
+    kb.append([InlineKeyboardButton(text="🔙", callback_data="auto_menu")])
+
+    await safe_edit(
+        message,
+        "Danh sách auto post" if posts else "Chưa có auto post nào.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+async def show_auto_view(message: types.Message, pid: int):
+    async with SessionLocal() as db:
+        p = await db.get(AutoPost, pid)
+
+    if not p:
+        return await message.answer("Auto post không tồn tại.")
+
+    await safe_edit(
+        message,
+        f"Post {p.id}\n"
+        f"Chat ID: {p.chat_id}\n"
+        f"Interval: {p.interval} phút\n"
+        f"Active: {'ON' if p.is_active else 'OFF'}\n"
+        f"Pin: {'ON' if p.pin else 'OFF'}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"⚡ {'ON' if p.is_active else 'OFF'}", callback_data=f"auto_toggle_{p.id}")],
+            [InlineKeyboardButton(text=f"📌 Ghim {'ON' if p.pin else 'OFF'}", callback_data=f"auto_pin_{p.id}")],
+            [InlineKeyboardButton(text="✏️ Text", callback_data=f"auto_text_{p.id}")],
+            [InlineKeyboardButton(text="🖼 Ảnh", callback_data=f"auto_img_{p.id}")],
+            [InlineKeyboardButton(text="🔘 Nút", callback_data=f"auto_btn_{p.id}")],
+            [InlineKeyboardButton(text="💬 Chat ID", callback_data=f"auto_chat_{p.id}")],
+            [InlineKeyboardButton(text="⏱ Interval", callback_data=f"auto_int_{p.id}")],
+            [InlineKeyboardButton(text="👁 Preview", callback_data=f"auto_pre_{p.id}")],
+            [InlineKeyboardButton(text="❌ Xoá", callback_data=f"auto_del_{p.id}")],
+            [InlineKeyboardButton(text="🔙", callback_data="auto_list")]
+        ])
+    )
 
 # ======================
 # START / HOME
@@ -165,7 +273,7 @@ async def cancel(m: types.Message):
 @dp.callback_query(F.data == "home")
 async def go_home(c: types.CallbackQuery):
     await c.answer()
-    await c.message.edit_text("🚀 Menu", reply_markup=home())
+    await safe_edit(c.message, "🚀 Menu", reply_markup=home())
 
 # ======================
 # KEYWORD
@@ -173,7 +281,7 @@ async def go_home(c: types.CallbackQuery):
 @dp.callback_query(F.data == "kw_menu")
 async def kw_menu(c: types.CallbackQuery):
     await c.answer()
-    await c.message.edit_text("📌 Keyword", reply_markup=kw_menu_kb())
+    await safe_edit(c.message, "📌 Keyword", reply_markup=kw_menu_kb())
 
 @dp.callback_query(F.data == "kw_add")
 async def kw_add(c: types.CallbackQuery):
@@ -186,48 +294,13 @@ async def kw_add(c: types.CallbackQuery):
 @dp.callback_query(F.data == "kw_list")
 async def kw_list(c: types.CallbackQuery):
     await c.answer()
-    async with SessionLocal() as db:
-        kws = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
-
-    kb = []
-    for k in kws:
-        kb.append([
-            InlineKeyboardButton(text=k.key, callback_data=f"kw_view_{k.id}"),
-            InlineKeyboardButton(text="❌", callback_data=f"kw_del_{k.id}")
-        ])
-
-    kb.append([InlineKeyboardButton(text="🔙", callback_data="kw_menu")])
-
-    await c.message.edit_text(
-        "Danh sách keyword" if kws else "Chưa có keyword nào.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
-    )
+    await show_kw_list(c.message)
 
 @dp.callback_query(F.data.startswith("kw_view_"))
 async def kw_view(c: types.CallbackQuery):
     await c.answer()
     kid = int(c.data.split("_")[-1])
-
-    async with SessionLocal() as db:
-        k = await db.get(Keyword, kid)
-
-    if not k:
-        return await c.message.answer("Keyword không tồn tại.")
-
-    await c.message.edit_text(
-        f"Keyword: {k.key}\n"
-        f"Text: {'Có' if k.text else 'Trống'}\n"
-        f"Ảnh: {'Có' if k.image else 'Không'}\n"
-        f"Nút: {'Có' if k.button else 'Không'}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Text", callback_data=f"kw_text_{k.id}")],
-            [InlineKeyboardButton(text="🖼 Ảnh", callback_data=f"kw_img_{k.id}")],
-            [InlineKeyboardButton(text="🔘 Nút", callback_data=f"kw_btn_{k.id}")],
-            [InlineKeyboardButton(text="👁 Preview", callback_data=f"kw_pre_{k.id}")],
-            [InlineKeyboardButton(text="❌ Xoá", callback_data=f"kw_del_{k.id}")],
-            [InlineKeyboardButton(text="🔙", callback_data="kw_list")]
-        ])
-    )
+    await show_kw_view(c.message, kid)
 
 @dp.callback_query(F.data.startswith("kw_text_"))
 async def kw_text(c: types.CallbackQuery):
@@ -287,7 +360,7 @@ async def kw_del(c: types.CallbackQuery):
         await db.execute(delete(Keyword).where(Keyword.id == kid))
         await db.commit()
 
-    await kw_list(c)
+    await show_kw_list(c.message)
 
 # ======================
 # AUTO POST
@@ -295,7 +368,7 @@ async def kw_del(c: types.CallbackQuery):
 @dp.callback_query(F.data == "auto_menu")
 async def auto_menu(c: types.CallbackQuery):
     await c.answer()
-    await c.message.edit_text("📅 Auto Post", reply_markup=auto_menu_kb())
+    await safe_edit(c.message, "📅 Auto Post", reply_markup=auto_menu_kb())
 
 @dp.callback_query(F.data == "auto_add")
 async def auto_add(c: types.CallbackQuery):
@@ -308,53 +381,13 @@ async def auto_add(c: types.CallbackQuery):
 @dp.callback_query(F.data == "auto_list")
 async def auto_list(c: types.CallbackQuery):
     await c.answer()
-    async with SessionLocal() as db:
-        posts = (await db.execute(select(AutoPost).order_by(AutoPost.id.desc()))).scalars().all()
-
-    kb = []
-    for p in posts:
-        kb.append([
-            InlineKeyboardButton(text=f"Post {p.id} ({'ON' if p.is_active else 'OFF'})", callback_data=f"auto_view_{p.id}"),
-            InlineKeyboardButton(text="❌", callback_data=f"auto_del_{p.id}")
-        ])
-
-    kb.append([InlineKeyboardButton(text="🔙", callback_data="auto_menu")])
-
-    await c.message.edit_text(
-        "Danh sách auto post" if posts else "Chưa có auto post nào.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
-    )
+    await show_auto_list(c.message)
 
 @dp.callback_query(F.data.startswith("auto_view_"))
 async def auto_view(c: types.CallbackQuery):
     await c.answer()
     pid = int(c.data.split("_")[-1])
-
-    async with SessionLocal() as db:
-        p = await db.get(AutoPost, pid)
-
-    if not p:
-        return await c.message.answer("Auto post không tồn tại.")
-
-    await c.message.edit_text(
-        f"Post {p.id}\n"
-        f"Chat ID: {p.chat_id}\n"
-        f"Interval: {p.interval} phút\n"
-        f"Active: {'ON' if p.is_active else 'OFF'}\n"
-        f"Pin: {'ON' if p.pin else 'OFF'}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"⚡ {'ON' if p.is_active else 'OFF'}", callback_data=f"auto_toggle_{p.id}")],
-            [InlineKeyboardButton(text=f"📌 Ghim {'ON' if p.pin else 'OFF'}", callback_data=f"auto_pin_{p.id}")],
-            [InlineKeyboardButton(text="✏️ Text", callback_data=f"auto_text_{p.id}")],
-            [InlineKeyboardButton(text="🖼 Ảnh", callback_data=f"auto_img_{p.id}")],
-            [InlineKeyboardButton(text="🔘 Nút", callback_data=f"auto_btn_{p.id}")],
-            [InlineKeyboardButton(text="💬 Chat ID", callback_data=f"auto_chat_{p.id}")],
-            [InlineKeyboardButton(text="⏱ Interval", callback_data=f"auto_int_{p.id}")],
-            [InlineKeyboardButton(text="👁 Preview", callback_data=f"auto_pre_{p.id}")],
-            [InlineKeyboardButton(text="❌ Xoá", callback_data=f"auto_del_{p.id}")],
-            [InlineKeyboardButton(text="🔙", callback_data="auto_list")]
-        ])
-    )
+    await show_auto_view(c.message, pid)
 
 @dp.callback_query(F.data.startswith("auto_toggle_"))
 async def auto_toggle(c: types.CallbackQuery):
@@ -368,7 +401,7 @@ async def auto_toggle(c: types.CallbackQuery):
         p.is_active = 0 if p.is_active else 1
         await db.commit()
 
-    await auto_view(c)
+    await show_auto_view(c.message, pid)
 
 @dp.callback_query(F.data.startswith("auto_pin_"))
 async def auto_pin(c: types.CallbackQuery):
@@ -382,7 +415,7 @@ async def auto_pin(c: types.CallbackQuery):
         p.pin = 0 if p.pin else 1
         await db.commit()
 
-    await auto_view(c)
+    await show_auto_view(c.message, pid)
 
 @dp.callback_query(F.data.startswith("auto_text_"))
 async def auto_text(c: types.CallbackQuery):
@@ -460,7 +493,7 @@ async def auto_del(c: types.CallbackQuery):
         await db.execute(delete(AutoPost).where(AutoPost.id == pid))
         await db.commit()
 
-    await auto_list(c)
+    await show_auto_list(c.message)
 
 # ======================
 # MESSAGE HANDLER FOR STATE + KEYWORD REPLY

@@ -1,1 +1,789 @@
+```
 
+---
+
+# 2) `templates/base.html`
+
+```html
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Admin Panel{% endblock %}</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <i class="bi bi-shield-lock-fill"></i>
+      <div>
+        <div class="brand-title">BOT Admin</div>
+        <div class="brand-sub">Control Panel</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="{{ url_for('dashboard') }}" class="nav-link {% if active_page=='dashboard' %}active{% endif %}">
+        <i class="bi bi-speedometer2"></i> Dashboard
+      </a>
+      <a href="{{ url_for('admins') }}" class="nav-link {% if active_page=='admins' %}active{% endif %}">
+        <i class="bi bi-people"></i> Admins
+      </a>
+      <a href="{{ url_for('groups') }}" class="nav-link {% if active_page=='groups' %}active{% endif %}">
+        <i class="bi bi-collection"></i> Groups
+      </a>
+      <a href="{{ url_for('keywords') }}" class="nav-link {% if active_page=='keywords' %}active{% endif %}">
+        <i class="bi bi-lightning-charge"></i> Keywords
+      </a>
+      <a href="{{ url_for('welcome') }}" class="nav-link {% if active_page=='welcome' %}active{% endif %}">
+        <i class="bi bi-chat-heart"></i> Welcome
+      </a>
+      <a href="{{ url_for('auto') }}" class="nav-link {% if active_page=='auto' %}active{% endif %}">
+        <i class="bi bi-calendar2-check"></i> Auto
+      </a>
+      <a href="{{ url_for('logs') }}" class="nav-link {% if active_page=='logs' %}active{% endif %}">
+        <i class="bi bi-journal-text"></i> Logs
+      </a>
+      <a href="{{ url_for('login') }}" class="nav-link">
+        <i class="bi bi-box-arrow-right"></i> Logout
+      </a>
+    </nav>
+  </aside>
+
+  <main class="main-content">
+    <header class="topbar">
+      <div>
+        <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+        <div class="page-subtitle">{% block page_subtitle %}{% endblock %}</div>
+      </div>
+      <div class="topbar-right">
+        <span class="badge text-bg-dark">YEAR {{ current_year }}</span>
+      </div>
+    </header>
+
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+```
+
+---
+
+# 3) `templates/login.html`
+
+```html
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login | Admin</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <div class="text-center mb-4">
+        <div class="auth-logo mx-auto mb-3">
+          <i class="bi bi-shield-lock-fill"></i>
+        </div>
+        <h1 class="auth-title">Đăng nhập Admin</h1>
+        <p class="auth-subtitle">BOT Web Panel</p>
+      </div>
+
+      {% if error %}
+      <div class="alert alert-danger">{{ error }}</div>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('login_post') }}">
+        <div class="mb-3">
+          <label class="form-label text-secondary">WEB_ADMIN_KEY</label>
+          <input
+            type="password"
+            name="key"
+            class="form-control form-control-dark"
+            placeholder="Nhập key quản trị"
+            required
+            autofocus
+          >
+        </div>
+
+        <button type="submit" class="btn btn-primary w-100">
+          <i class="bi bi-box-arrow-in-right me-1"></i> Đăng nhập
+        </button>
+      </form>
+
+      <div class="text-center mt-3 small text-secondary">
+        Sau khi đăng nhập, bạn sẽ vào dashboard.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+```
+
+---
+
+# 4) `templates/dashboard.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_subtitle %}Tổng quan hệ thống{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-4">
+  {% for s in stats %}
+  <div class="col-12 col-md-6 col-xl-3">
+    <div class="stat-card">
+      <div class="stat-icon bg-{{ s.color }}">
+        <i class="bi {{ s.icon }}"></i>
+      </div>
+      <div class="stat-body">
+        <div class="stat-label">{{ s.label }}</div>
+        <div class="stat-value">{{ s.value }}</div>
+        <div class="stat-note">{{ s.note }}</div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="row g-4">
+  <div class="col-12 col-xl-7">
+    <div class="panel-card">
+      <div class="panel-header">
+        <h5 class="mb-0">Recent Logs</h5>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-dark table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>User</th>
+              <th>Action</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for log in recent_logs %}
+            <tr>
+              <td>{{ log.time }}</td>
+              <td>{{ log.user }}</td>
+              <td>{{ log.action }}</td>
+              <td><span class="badge {{ log.badge_class }}">{{ log.status }}</span></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-5">
+    <div class="panel-card">
+      <div class="panel-header">
+        <h5 class="mb-0">System Info</h5>
+      </div>
+      <div class="info-list">
+        {% for item in system_info %}
+        <div class="info-row">
+          <div class="info-label">{{ item.label }}</div>
+          <div class="info-value">{{ item.value }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 5) `templates/admins.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Admins{% endblock %}
+{% block page_title %}Admins{% endblock %}
+{% block page_subtitle %}Quản lý admin trong DB{% endblock %}
+
+{% block content %}
+<div class="panel-card mb-4">
+  <div class="panel-header">
+    <h5 class="mb-0">Add Admin</h5>
+  </div>
+
+  <form method="post" action="{{ url_for('admins_add') }}" class="row g-3">
+    <input type="hidden" name="key" value="{{ admin_key }}">
+    <div class="col-12 col-md-3">
+      <input type="number" name="user_id" class="form-control form-control-dark" placeholder="User ID" required>
+    </div>
+    <div class="col-12 col-md-7">
+      <input type="text" name="note" class="form-control form-control-dark" placeholder="Note">
+    </div>
+    <div class="col-12 col-md-2">
+      <button class="btn btn-primary w-100" type="submit">Add</button>
+    </div>
+  </form>
+</div>
+
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Admin List</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>User ID</th>
+          <th>Note</th>
+          <th>Created At</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in admins %}
+        <tr>
+          <td>{{ a.id }}</td>
+          <td>{{ a.user_id }}</td>
+          <td>{{ a.note }}</td>
+          <td>{{ a.created_at }}</td>
+          <td class="text-end">
+            <form method="post" action="{{ url_for('admins_delete') }}" class="d-inline">
+              <input type="hidden" name="key" value="{{ admin_key }}">
+              <input type="hidden" name="user_id" value="{{ a.user_id }}">
+              <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 6) `templates/groups.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Groups{% endblock %}
+{% block page_title %}Groups{% endblock %}
+{% block page_subtitle %}Danh sách group đã theo dõi{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Group List</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Chat ID</th>
+          <th>Title</th>
+          <th>Type</th>
+          <th>Admin</th>
+          <th>Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for g in groups %}
+        <tr>
+          <td>{{ g.id }}</td>
+          <td>{{ g.chat_id }}</td>
+          <td>{{ g.title }}</td>
+          <td>{{ g.type }}</td>
+          <td>{{ "✅" if g.is_admin else "❌" }}</td>
+          <td>{{ g.updated_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 7) `templates/keywords.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Keywords{% endblock %}
+{% block page_title %}Keywords{% endblock %}
+{% block page_subtitle %}Danh sách keyword auto reply{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Keyword List</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Key</th>
+          <th>Mode</th>
+          <th>Active</th>
+          <th>Text</th>
+          <th>Image</th>
+          <th>Button</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in keywords %}
+        <tr>
+          <td>{{ k.id }}</td>
+          <td>{{ k.key }}</td>
+          <td>{{ k.mode }}</td>
+          <td>{{ "✅" if k.active else "❌" }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ k.text }}</td>
+          <td class="text-truncate" style="max-width:160px">{{ k.image }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ k.button }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 8) `templates/welcome.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Welcome{% endblock %}
+{% block page_title %}Welcome{% endblock %}
+{% block page_subtitle %}Danh sách cấu hình chào mừng{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Welcome Settings</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Chat ID</th>
+          <th>Active</th>
+          <th>Delete After</th>
+          <th>Pin</th>
+          <th>Text</th>
+          <th>Image</th>
+          <th>Button</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for w in welcomes %}
+        <tr>
+          <td>{{ w.id }}</td>
+          <td>{{ w.chat_id }}</td>
+          <td>{{ "✅" if w.active else "❌" }}</td>
+          <td>{{ w.delete_after }}</td>
+          <td>{{ "✅" if w.pin else "❌" }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ w.text }}</td>
+          <td class="text-truncate" style="max-width:160px">{{ w.image }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ w.button }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 9) `templates/auto.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Auto{% endblock %}
+{% block page_title %}Auto{% endblock %}
+{% block page_subtitle %}Danh sách auto post{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">Auto Posts</h5>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Chat ID</th>
+          <th>Active</th>
+          <th>Interval</th>
+          <th>Pin</th>
+          <th>Start</th>
+          <th>End</th>
+          <th>Last Sent</th>
+          <th>Text</th>
+          <th>Image</th>
+          <th>Button</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in autos %}
+        <tr>
+          <td>{{ p.id }}</td>
+          <td>{{ p.chat_id }}</td>
+          <td>{{ "✅" if p.active else "❌" }}</td>
+          <td>{{ p.interval }}</td>
+          <td>{{ "✅" if p.pin else "❌" }}</td>
+          <td>{{ p.start_at }}</td>
+          <td>{{ p.end_at }}</td>
+          <td>{{ p.last_sent_ts }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ p.text }}</td>
+          <td class="text-truncate" style="max-width:160px">{{ p.image }}</td>
+          <td class="text-truncate" style="max-width:220px">{{ p.button }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 10) `templates/logs.html`
+
+```html
+{% extends "base.html" %}
+
+{% block title %}Logs{% endblock %}
+{% block page_title %}Logs{% endblock %}
+{% block page_subtitle %}Trang logs tạm thời{% endblock %}
+
+{% block content %}
+<div class="panel-card">
+  <div class="panel-header">
+    <h5 class="mb-0">System Logs</h5>
+  </div>
+
+  <div class="alert alert-info mb-0">
+    Trang logs hiện đang là placeholder. Nếu muốn, mình có thể làm thêm file log thật từ database hoặc file .log.
+  </div>
+</div>
+{% endblock %}
+```
+
+---
+
+# 11) `static/style.css`
+
+```css
+:root{
+  --bg: #0e1117;
+  --panel: #151a22;
+  --panel-2: #1b2230;
+  --text: #e6e9ef;
+  --muted: #9aa4b2;
+  --border: rgba(255,255,255,.08);
+  --accent: #4f8cff;
+}
+
+* { box-sizing: border-box; }
+
+body{
+  margin:0;
+  background: linear-gradient(180deg, #0b0f16 0%, #0e1117 100%);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+a { text-decoration: none; }
+
+.app-shell{
+  display:flex;
+  min-height:100vh;
+}
+
+.sidebar{
+  width: 270px;
+  background: rgba(10,14,20,.85);
+  border-right: 1px solid var(--border);
+  padding: 20px 16px;
+}
+
+.sidebar-brand{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding: 8px 8px 18px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-brand i{
+  font-size: 1.8rem;
+  color: #7cc0ff;
+}
+
+.brand-title{
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.brand-sub{
+  font-size: .85rem;
+  color: var(--muted);
+}
+
+.sidebar-nav{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.nav-link{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: var(--text);
+  background: transparent;
+  transition: .2s ease;
+}
+
+.nav-link:hover,
+.nav-link.active{
+  background: var(--panel-2);
+  color: #fff;
+}
+
+.main-content{
+  flex:1;
+  padding: 26px;
+}
+
+.topbar{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  margin-bottom: 20px;
+}
+
+.page-title{
+  margin:0;
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+
+.page-subtitle{
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.panel-card,
+.stat-card,
+.auth-card{
+  background: rgba(21,26,34,.95);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.18);
+}
+
+.panel-card{
+  padding: 18px;
+}
+
+.panel-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-bottom: 14px;
+}
+
+.stat-card{
+  display:flex;
+  gap:14px;
+  padding: 18px;
+  align-items:center;
+}
+
+.stat-icon{
+  width:52px;
+  height:52px;
+  border-radius: 16px;
+  display:grid;
+  place-items:center;
+  color:#fff;
+  font-size: 1.4rem;
+}
+
+.stat-body{ flex:1; }
+.stat-label{ color: var(--muted); font-size:.9rem; }
+.stat-value{ font-size: 1.7rem; font-weight: 800; line-height: 1.1; }
+.stat-note{ color: var(--muted); font-size:.85rem; }
+
+.info-list{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+.info-row{
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  padding:10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.info-row:last-child{ border-bottom:none; }
+.info-label{ color: var(--muted); }
+.info-value{ font-weight: 600; text-align:right; }
+
+.table-dark{
+  --bs-table-bg: transparent;
+  --bs-table-color: var(--text);
+  --bs-table-border-color: var(--border);
+}
+
+.form-control-dark{
+  background: #0f1420;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.form-control-dark:focus{
+  background:#0f1420;
+  color:#fff;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 .2rem rgba(79,140,255,.15);
+}
+
+.auth-wrap{
+  min-height:100vh;
+  display:grid;
+  place-items:center;
+  padding:24px;
+}
+
+.auth-card{
+  width:100%;
+  max-width:420px;
+  padding:28px;
+}
+
+.auth-logo{
+  width:72px;
+  height:72px;
+  border-radius:20px;
+  display:grid;
+  place-items:center;
+  background: linear-gradient(135deg, #4f8cff 0%, #7d5cff 100%);
+  color:#fff;
+  font-size: 2rem;
+}
+
+.auth-title{
+  margin: 0;
+  font-size:1.7rem;
+  font-weight:800;
+}
+.auth-subtitle{
+  color: var(--muted);
+  margin-top:6px;
+  margin-bottom:0;
+}
+
+@media (max-width: 992px){
+  .app-shell{ flex-direction:column; }
+  .sidebar{ width:100%; }
+  .main-content{ padding:18px; }
+}
+```
+
+---
+
+# 12) Cài package cần thiết
+
+Nếu dùng PostgreSQL async:
+
+```bash
+pip install asyncpg
+```
+
+Nếu dùng SQLite async:
+
+```bash
+pip install aiosqlite
+```
+
+Và nên có:
+
+```bash
+pip install fastapi uvicorn jinja2 python-multipart aiogram SQLAlchemy python-dotenv openai
+```
+
+---
+
+# 13) Chạy
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000 --app-dir project
+```
+
+---
+
+# 14) Đăng nhập web
+
+Mở:
+
+```bash
+/admin/login
+```
+
+Nhập đúng `WEB_ADMIN_KEY`.
+
+---
+
+Nếu bạn muốn, bước tiếp theo mình có thể làm luôn cho bạn:
+
+- thêm nút **Sửa/Xóa** đầy đủ trong các trang `keywords/welcome/auto`
+- làm **logs thật**
+- làm **dashboard đẹp hơn nữa** kiểu admin panel xịn
+
+Nếu muốn mình làm tiếp, chỉ cần nhắn: **“làm luôn bản CRUD đẹp”**.

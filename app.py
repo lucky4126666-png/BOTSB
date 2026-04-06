@@ -1,36 +1,88 @@
 import os
 import time
+import ssl
 import asyncio
 import contextlib
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Text, select, delete
+from sqlalchemy import Column, Integer, String, Text, select, delete, text
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# ======================
+# ENV
+# ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
+DB_SSL = os.getenv("DB_SSL", "true").lower() in ("1", "true", "yes", "on")
 
 if not BOT_TOKEN or not BASE_URL or not DATABASE_URL:
     raise RuntimeError("Thiếu BOT_TOKEN / BASE_URL / DATABASE_URL trong file .env")
 
 BASE_URL = BASE_URL.rstrip("/")
 
+# ======================
+# DB URL NORMALIZE
+# ======================
+def normalize_database_url(url: str) -> str:
+    """
+    - đổi postgres:// hoặc postgresql:// -> postgresql+asyncpg://
+    - loại bỏ sslmode nếu có
+    """
+    url = url.strip()
+
+    if url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+
+    # remove sslmode from query if exists
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.pop("sslmode", None)
+
+    url = urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urlencode(query),
+        parsed.fragment
+    ))
+    return url
+
+DATABASE_URL = normalize_database_url(DATABASE_URL)
+
+# ======================
+# APP / BOT
+# ======================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-engine = create_async_engine(DATABASE_URL, echo=False)
-SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+ssl_context = ssl.create_default_context() if DB_SSL else None
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={"ssl": ssl_context} if DB_SSL else {}
+)
+
+SessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False
+)
+
 Base = declarative_base()
 
 worker_task = None
@@ -47,7 +99,7 @@ def reset(uid):
     temp.pop(uid, None)
 
 # ======================
-# BUTTON
+# BUTTON PARSER
 # Format:
 # Text - https://url.com && Text 2 - https://url2.com
 # Dòng mới = hàng mới
@@ -72,6 +124,7 @@ def parse_buttons(text):
                 continue
 
             row.append({"text": t.strip(), "url": u.strip()})
+
         if row:
             rows.append(row)
 
@@ -80,6 +133,7 @@ def parse_buttons(text):
 def build_buttons(data):
     if not data:
         return None
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=b["text"], url=b["url"]) for b in row]
@@ -110,7 +164,7 @@ class AutoPost(Base):
     pin = Column(Integer, default=0)
 
 # ======================
-# MENU
+# KEYBOARD
 # ======================
 def home():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -135,13 +189,13 @@ def auto_menu_kb():
 # ======================
 # HELPERS
 # ======================
-async def safe_edit(message: types.Message, text: str, reply_markup=None):
+async def safe_edit(message: types.Message, text_: str, reply_markup=None):
     try:
-        return await message.edit_text(text, reply_markup=reply_markup)
+        return await message.edit_text(text_, reply_markup=reply_markup)
     except TelegramBadRequest:
-        return await message.answer(text, reply_markup=reply_markup)
+        return await message.answer(text_, reply_markup=reply_markup)
     except Exception:
-        return await message.answer(text, reply_markup=reply_markup)
+        return await message.answer(text_, reply_markup=reply_markup)
 
 async def send_preview(chat_id, text=None, image=None, button=None):
     kb = build_buttons(parse_buttons(button))
@@ -177,6 +231,7 @@ async def show_kw_list(message: types.Message):
             InlineKeyboardButton(text=k.key, callback_data=f"kw_view_{k.id}"),
             InlineKeyboardButton(text="❌", callback_data=f"kw_del_{k.id}")
         ])
+
     kb.append([InlineKeyboardButton(text="🔙", callback_data="kw_menu")])
 
     await safe_edit(
@@ -221,6 +276,7 @@ async def show_auto_list(message: types.Message):
             ),
             InlineKeyboardButton(text="❌", callback_data=f"auto_del_{p.id}")
         ])
+
     kb.append([InlineKeyboardButton(text="🔙", callback_data="auto_menu")])
 
     await safe_edit(
@@ -257,16 +313,30 @@ async def show_auto_view(message: types.Message, pid: int):
         ])
     )
 
+async def ensure_schema():
+    async with engine.begin() as conn:
+        # tạo bảng nếu chưa có
+        await conn.run_sync(Base.metadata.create_all)
+
+        # thêm cột thiếu nếu bảng cũ
+        await conn.execute(text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 0"))
+        await conn.execute(text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS pin INTEGER DEFAULT 0"))
+        await conn.execute(text("ALTER TABLE auto_post ADD COLUMN IF NOT EXISTS interval INTEGER DEFAULT 10"))
+
 # ======================
 # START / HOME
 # ======================
 @dp.message(F.text == "/start")
 async def start(m: types.Message):
+    if not m.from_user:
+        return
     reset(m.from_user.id)
     await m.answer("🚀 Menu", reply_markup=home())
 
 @dp.message(F.text == "/cancel")
 async def cancel(m: types.Message):
+    if not m.from_user:
+        return
     reset(m.from_user.id)
     await m.answer("Đã huỷ thao tác.", reply_markup=home())
 
@@ -500,6 +570,9 @@ async def auto_del(c: types.CallbackQuery):
 # ======================
 @dp.message()
 async def all_messages(m: types.Message):
+    if not m.from_user:
+        return
+
     uid = m.from_user.id
     state = user_state.get(uid)
 
@@ -639,12 +712,12 @@ async def all_messages(m: types.Message):
         return await m.answer("Đã cập nhật interval.", reply_markup=home())
 
     # ===== KEYWORD AUTO REPLY =====
-    text = (m.text or "").strip()
-    if not text or text.startswith("/"):
+    text_ = (m.text or "").strip()
+    if not text_ or text_.startswith("/"):
         return
 
     async with SessionLocal() as db:
-        k = (await db.execute(select(Keyword).where(Keyword.key == text))).scalars().first()
+        k = (await db.execute(select(Keyword).where(Keyword.key == text_))).scalars().first()
 
     if k:
         await send_preview(
@@ -720,8 +793,7 @@ async def webhook(req: Request):
 async def startup():
     global worker_task
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await ensure_schema()
 
     worker_task = asyncio.create_task(auto_worker())
 
@@ -743,3 +815,4 @@ async def shutdown():
         await bot.delete_webhook()
 
     await bot.session.close()
+

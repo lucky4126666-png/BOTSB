@@ -1,7 +1,10 @@
 import os
 import time
+import json
+import random
 import asyncio
 import contextlib
+from html import escape
 from datetime import datetime
 from typing import Optional
 
@@ -12,8 +15,12 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import pass_context
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ChatPermissions,
+)
 from aiogram.exceptions import TelegramBadRequest
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -46,11 +53,24 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+WELCOME_DEFAULT_BUTTONS = os.getenv(
+    "WELCOME_DEFAULT_BUTTONS",
+    "新币供需 - https://t.me/gqdh && 新币公群 - https://t.me/gqdh"
+)
+WELCOME_RANDOM_NAMES = [
+    x.strip() for x in os.getenv(
+        "WELCOME_RANDOM_NAMES",
+        "宝宝,老板,大哥,贵宾,帅哥,美女,小可爱,新朋友,幸运星,尊贵用户,VIP贵宾"
+    ).split(",") if x.strip()
+]
+
+AI_AGENT_ENABLED = os.getenv("AI_AGENT_ENABLED", "true").lower() == "true"
+AI_AGENT_CONFIRM_REQUIRED = os.getenv("AI_AGENT_CONFIRM_REQUIRED", "true").lower() == "true"
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-# Tự tạo folder nếu thiếu, tránh lỗi StaticFiles trên Railway
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
@@ -134,6 +154,39 @@ LANG_TEXT = {
         "ai_error": "Xử lý AI thất bại.",
     }
 }
+
+AI_AGENT_SYSTEM_PROMPT = """
+你是 Telegram 管理机器人里的 AI 管家。
+你的任务是帮助 OWNER / 管理员理解如何使用机器人，或者把自然语言请求转换成受限动作。
+
+规则：
+1. 只允许输出 JSON。
+2. 不允许输出代码块，不允许输出解释性前缀。
+3. 如果用户是在询问怎么用，返回 action=help。
+4. 如果用户是在要求机器人执行操作，只能从以下动作中选择：
+   help
+   show_groups
+   list_keywords
+   rename_group
+   lock_group
+   unlock_group
+   add_keyword
+   set_welcome_text
+   set_welcome_button
+   toggle_welcome
+5. 不要创造未授权动作。
+6. 高风险动作（rename_group, lock_group, unlock_group）请设置 need_confirm=true。
+7. 如果信息不全，设置 need_more=true，并提出最简短问题。
+8. 输出格式固定：
+{
+  "action": "...",
+  "need_confirm": false,
+  "need_more": false,
+  "question": "",
+  "reply": "",
+  "params": {}
+}
+"""
 
 
 def allowed_admin_ids():
@@ -228,10 +281,6 @@ async def allowed_or_ignore(c: types.CallbackQuery):
     return True
 
 
-# ======================
-# BUTTON PARSER
-# ======================
-
 def parse_buttons(text):
     if not text:
         return None
@@ -278,7 +327,7 @@ async def safe_edit(message, text_: str, reply_markup=None):
         return await message.answer(text_, reply_markup=reply_markup)
 
 
-async def send_preview(chat_id, text=None, image=None, button=None):
+async def send_preview(chat_id, text=None, image=None, button=None, parse_mode=None):
     kb = build_buttons(parse_buttons(button))
     try:
         if image:
@@ -286,12 +335,14 @@ async def send_preview(chat_id, text=None, image=None, button=None):
                 chat_id=chat_id,
                 photo=image,
                 caption=text or "",
-                reply_markup=kb
+                reply_markup=kb,
+                parse_mode=parse_mode
             )
         return await bot.send_message(
             chat_id=chat_id,
             text=text or " ",
-            reply_markup=kb
+            reply_markup=kb,
+            parse_mode=parse_mode
         )
     except Exception as e:
         print(f"[SEND_PREVIEW ERROR] chat_id={chat_id} error={e}")
@@ -315,6 +366,174 @@ def parse_dt(s: str):
         return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
     except Exception:
         return None
+
+
+def default_welcome_button_text():
+    return WELCOME_DEFAULT_BUTTONS
+
+
+async def is_chat_admin(bot_: Bot, chat_id: int | str, user_id: int) -> bool:
+    try:
+        member = await bot_.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+async def lock_group(chat_id: int | str):
+    await bot.set_chat_permissions(
+        chat_id=chat_id,
+        permissions=ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+    )
+
+
+async def unlock_group(chat_id: int | str):
+    await bot.set_chat_permissions(
+        chat_id=chat_id,
+        permissions=ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+    )
+
+
+def normalize_form_text(text: str) -> str:
+    return (text or "").replace("：", ":").strip()
+
+
+def parse_guarantee_form(text: str) -> dict:
+    data = {}
+    for raw in normalize_form_text(text).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("担保表单"):
+            continue
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        data[k.strip()] = v.strip()
+    return data
+
+
+def build_group_title_from_form(data: dict) -> str:
+    group_name = (data.get("组别") or "").strip()
+    number = (data.get("编号") or "").strip()
+    rule = (data.get("规则") or "").strip().replace(" ", "")
+    name = (data.get("名字") or "").strip()
+
+    title = f"{group_name} {number}-{rule} {name}".strip()
+    return title[:128]
+
+
+def build_welcome_text(template: str, user: types.User, chat_title: str = "", chat_id: str = "") -> str:
+    first_name = escape(user.first_name or "")
+    last_name = escape(user.last_name or "")
+    full_name = escape(" ".join(
+        x for x in [user.first_name or "", user.last_name or ""] if x
+    ).strip())
+    username = f"@{user.username}" if user.username else "-"
+    username = escape(username)
+    rand_name = random.choice(WELCOME_RANDOM_NAMES) if WELCOME_RANDOM_NAMES else "VIP用户"
+    mention_label = first_name or full_name or "新成员"
+    mention = f'<a href="tg://user?id={user.id}">{mention_label}</a>'
+    chat_title = escape(chat_title or "")
+    chat_id = escape(str(chat_id or ""))
+
+    text = template or ""
+
+    replacements = {
+        "{first_name}": first_name,
+        "{last_name}": last_name,
+        "{full_name}": full_name,
+        "{username}": username,
+        "{mention}": mention,
+        "{rand_name}": rand_name,
+        "{chat_title}": chat_title,
+        "{chat_id}": chat_id,
+
+        "(*name*)": mention,
+        "(*fullname*)": full_name,
+        "(*username*)": username,
+        "(*rand*)": rand_name,
+        "(*group*)": chat_title,
+        "(*groupid*)": chat_id,
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text
+
+
+async def ai_agent_parse(user_text: str):
+    if not openai_client:
+        return {
+            "action": "help",
+            "need_confirm": False,
+            "need_more": False,
+            "question": "",
+            "reply": "未配置 OpenAI API。",
+            "params": {}
+        }
+
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": AI_AGENT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_text}
+            ],
+            temperature=0.2
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("invalid json")
+
+        return {
+            "action": data.get("action", "help"),
+            "need_confirm": bool(data.get("need_confirm", False)),
+            "need_more": bool(data.get("need_more", False)),
+            "question": data.get("question", ""),
+            "reply": data.get("reply", ""),
+            "params": data.get("params", {}) or {}
+        }
+    except Exception as e:
+        print("[AI AGENT PARSE ERROR]", e)
+        return {
+            "action": "help",
+            "need_confirm": False,
+            "need_more": False,
+            "question": "",
+            "reply": "我没有完全理解你的要求，请换一种更明确的说法。",
+            "params": {}
+        }
 
 
 # ======================
@@ -377,6 +596,12 @@ class AdminUser(Base):
     created_at = Column(Integer, default=0)
 
 
+class BannedWord(Base):
+    __tablename__ = "banned_words"
+    id = Column(Integer, primary_key=True)
+    word = Column(String, unique=True, index=True)
+
+
 # ======================
 # MENUS
 # ======================
@@ -397,6 +622,8 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="📌 关键词", callback_data="kw_menu")],
         [InlineKeyboardButton(text="👋 群组欢迎", callback_data="wl_menu")],
         [InlineKeyboardButton(text="📅 定时发送", callback_data="auto_menu")],
+        [InlineKeyboardButton(text="🚫 禁词", callback_data="ban_menu")],
+        [InlineKeyboardButton(text="🧠 AI管家", callback_data="ai_agent_menu")],
         [InlineKeyboardButton(text="🌐 语言", callback_data="lang_menu")],
         [InlineKeyboardButton(text="🤖 OpenAI", callback_data="ai_menu")],
         [InlineKeyboardButton(text="⬅️ 返回", callback_data="back_start")],
@@ -407,6 +634,11 @@ def group_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 群组列表", callback_data="group_list")],
         [InlineKeyboardButton(text="➕ 选择群组", callback_data="group_pick")],
+        [InlineKeyboardButton(text="📝 修改群名", callback_data="group_rename")],
+        [
+            InlineKeyboardButton(text="🔒 锁群", callback_data="group_lock"),
+            InlineKeyboardButton(text="🔓 开群", callback_data="group_unlock")
+        ],
         [InlineKeyboardButton(text="⬅️ 返回", callback_data="back_start")],
     ])
 
@@ -458,6 +690,14 @@ def auto_menu_kb():
     ])
 
 
+def ban_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ 添加", callback_data="ban_add")],
+        [InlineKeyboardButton(text="📋 列表", callback_data="ban_list")],
+        [InlineKeyboardButton(text="⬅️ 返回", callback_data="admin_menu")],
+    ])
+
+
 # ======================
 # HELPERS
 # ======================
@@ -500,10 +740,10 @@ async def show_kw_list(message):
         rows = (await db.execute(select(Keyword).order_by(Keyword.id.desc()))).scalars().all()
 
     kb = []
-    for k in rows:
+    for i, k in enumerate(rows, start=1):
         kb.append([
             InlineKeyboardButton(
-                text=f"{k.key} ({'✅' if k.active else '❌'})",
+                text=f"{i}. {k.key} ({'✅' if k.active else '❌'})",
                 callback_data=f"kw_view_{k.id}"
             ),
             InlineKeyboardButton(text="🗑", callback_data=f"kw_del_{k.id}")
@@ -650,6 +890,151 @@ async def show_auto_view(message, pid):
     )
 
 
+async def show_banned_list(message):
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(BannedWord).order_by(BannedWord.id.asc()))).scalars().all()
+
+    kb = []
+    for i, row in enumerate(rows, start=1):
+        kb.append([
+            InlineKeyboardButton(text=f"{i}. {row.word}", callback_data="ban_noop"),
+            InlineKeyboardButton(text="🗑", callback_data=f"ban_del_{row.id}")
+        ])
+    kb.append([InlineKeyboardButton(text="⬅️ 返回", callback_data="ban_menu")])
+
+    await safe_edit(
+        message,
+        "🚫 禁词列表" if rows else "暂无禁词。",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+
+async def execute_ai_action(m: types.Message, uid: int, action: str, params: dict):
+    chat_id = selected_group.get(uid)
+
+    if action == "help":
+        return await m.answer(params.get("text") or "请直接说你要做什么，例如：添加关键词、修改欢迎词、锁群。")
+
+    if action == "show_groups":
+        groups = await get_all_groups()
+        if not groups:
+            return await m.answer("暂无群组。")
+        text = "群组列表：\n\n" + "\n".join(
+            f"{i}. {g.title or g.chat_id} ({g.chat_id})"
+            for i, g in enumerate(groups, start=1)
+        )
+        return await m.answer(text)
+
+    if action == "list_keywords":
+        return await show_kw_list(m)
+
+    if action == "rename_group":
+        if not chat_id:
+            return await m.answer("请先选择群组。")
+        new_title = (params.get("title") or "").strip()
+        if not new_title:
+            return await m.answer("缺少新的群名。")
+        await bot.set_chat_title(chat_id=chat_id, title=new_title[:128])
+        async with SessionLocal() as db:
+            row = (await db.execute(select(BotGroup).where(BotGroup.chat_id == str(chat_id)))).scalars().first()
+            if row:
+                row.title = new_title[:128]
+                row.updated_at = int(time.time())
+                await db.commit()
+        return await m.answer(f"✅ 群名已修改为：{new_title}")
+
+    if action == "lock_group":
+        if not chat_id:
+            return await m.answer("请先选择群组。")
+        await lock_group(chat_id)
+        return await m.answer("🔒 已锁群。")
+
+    if action == "unlock_group":
+        if not chat_id:
+            return await m.answer("🔓 请先选择群组。") if False else await m.answer("请先选择群组。")
+        await unlock_group(chat_id)
+        return await m.answer("🔓 已开群。")
+
+    if action == "add_keyword":
+        key = (params.get("key") or "").strip()
+        if not key:
+            return await m.answer("缺少关键词。")
+
+        async with SessionLocal() as db:
+            exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
+            if exists:
+                return await m.answer("关键词已存在。")
+            row = Keyword(key=key, mode="exact", active=1, text="", image="", button="")
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+
+        return await m.answer(f"✅ 已添加关键词：{key}")
+
+    if action == "set_welcome_text":
+        if not chat_id:
+            return await m.answer("请先选择群组。")
+        text_value = (params.get("text") or "").strip()
+        if not text_value:
+            return await m.answer("缺少欢迎文本。")
+
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(WelcomeSetting).where(WelcomeSetting.chat_id == str(chat_id))
+            )).scalars().first()
+
+            if not row:
+                row = WelcomeSetting(chat_id=str(chat_id), active=1)
+                db.add(row)
+
+            row.text = text_value
+            await db.commit()
+
+        return await m.answer("✅ 欢迎文本已更新。")
+
+    if action == "set_welcome_button":
+        if not chat_id:
+            return await m.answer("请先选择群组。")
+        button_value = (params.get("button") or "").strip()
+        if not button_value:
+            return await m.answer("缺少按钮内容。")
+
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(WelcomeSetting).where(WelcomeSetting.chat_id == str(chat_id))
+            )).scalars().first()
+
+            if not row:
+                row = WelcomeSetting(chat_id=str(chat_id), active=1)
+                db.add(row)
+
+            row.button = button_value
+            await db.commit()
+
+        return await m.answer("✅ 欢迎按钮已更新。")
+
+    if action == "toggle_welcome":
+        if not chat_id:
+            return await m.answer("请先选择群组。")
+
+        enabled = params.get("enabled")
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(WelcomeSetting).where(WelcomeSetting.chat_id == str(chat_id))
+            )).scalars().first()
+
+            if not row:
+                row = WelcomeSetting(chat_id=str(chat_id), active=1)
+                db.add(row)
+
+            row.active = 1 if enabled in (True, 1, "1", "true", "on", "开启") else 0
+            await db.commit()
+
+        return await m.answer(f"✅ 欢迎已{'开启' if row.active else '关闭'}。")
+
+    return await m.answer("这个操作暂不支持。")
+
+
 # ======================
 # TRACK BOT IN GROUP
 # ======================
@@ -705,7 +1090,8 @@ async def track_bot_membership(event: types.ChatMemberUpdated):
         async with SessionLocal() as db:
             await db.execute(delete(BotGroup).where(BotGroup.chat_id == chat_id))
             await db.commit()
-            
+
+
 # ======================
 # START / HOME
 # ======================
@@ -726,7 +1112,7 @@ async def start(m: types.Message):
         )
         return
 
-    if not is_allowed_user(uid):
+    if not is_allowed_user(uid) and m.chat.type == "private":
         return
 
     reset(uid)
@@ -749,11 +1135,12 @@ async def start(m: types.Message):
         return
 
     groups = await get_admin_groups()
-    if groups:
+    if groups and is_allowed_user(uid):
         await m.answer("👥 请选择要管理的群组：", reply_markup=group_select_kb(groups))
         return
 
-    await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
+    if is_allowed_user(uid):
+        await m.answer(t(uid, "home"), reply_markup=start_menu_kb(uid))
 
 
 @dp.message(F.text == "/cancel")
@@ -761,7 +1148,8 @@ async def cancel(m: types.Message):
     if not m.from_user:
         return
     reset(m.from_user.id)
-    await m.answer("已取消操作。", reply_markup=start_menu_kb(m.from_user.id))
+    if is_allowed_user(m.from_user.id):
+        await m.answer("已取消操作。", reply_markup=start_menu_kb(m.from_user.id))
 
 
 @dp.message(F.text == "/ai")
@@ -774,10 +1162,65 @@ async def ai_cmd(m: types.Message):
     await m.answer(t(uid, "ai_prompt"))
 
 
+@dp.message(Command("addadmin"))
+async def add_admin_cmd(m: types.Message):
+    if not m.from_user or m.from_user.id != OWNER_ID:
+        return await m.answer("❌ 只有 OWNER 可以添加管理员。")
+
+    parts = (m.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        return await m.answer("用法：/addadmin USER_ID")
+
+    user_id = int(parts[1])
+    if user_id == OWNER_ID:
+        return await m.answer("不能添加 OWNER。")
+
+    async with SessionLocal() as db:
+        row = (await db.execute(select(AdminUser).where(AdminUser.user_id == user_id))).scalars().first()
+        if not row:
+            db.add(AdminUser(user_id=user_id, note="", created_at=int(time.time())))
+            await db.commit()
+
+    await load_admin_cache()
+    await m.answer(f"✅ 已添加管理员：{user_id}")
+
+
+@dp.message(Command("deladmin"))
+async def del_admin_cmd(m: types.Message):
+    if not m.from_user or m.from_user.id != OWNER_ID:
+        return await m.answer("❌ 只有 OWNER 可以删除管理员。")
+
+    parts = (m.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        return await m.answer("用法：/deladmin USER_ID")
+
+    user_id = int(parts[1])
+    if user_id == OWNER_ID:
+        return await m.answer("不能删除 OWNER。")
+
+    async with SessionLocal() as db:
+        await db.execute(delete(AdminUser).where(AdminUser.user_id == user_id))
+        await db.commit()
+
+    await load_admin_cache()
+    await m.answer(f"✅ 已删除管理员：{user_id}")
+
+
+@dp.message(Command("admins"))
+async def list_admins_cmd(m: types.Message):
+    if not m.from_user or m.from_user.id != OWNER_ID:
+        return await m.answer("❌ 只有 OWNER 可以查看管理员。")
+
+    ids = sorted(allowed_admin_ids())
+    txt = "👑 管理员列表：\n\n" + "\n".join(f"{i}. {x}" for i, x in enumerate(ids, start=1))
+    await m.answer(txt)
+
+
 @dp.callback_query(F.data == "back_start")
 async def back_start(c: types.CallbackQuery):
     if not await allowed_or_ignore(c):
         return
+    reset(c.from_user.id)
     await safe_edit(c.message, t(c.from_user.id, "home"), reply_markup=start_menu_kb(c.from_user.id))
 
 
@@ -814,6 +1257,29 @@ async def ai_menu(c: types.CallbackQuery):
     user_state[uid] = "ai_prompt"
     temp[uid] = {}
     await c.message.answer(t(uid, "ai_prompt"))
+
+
+@dp.callback_query(F.data == "ai_agent_menu")
+async def ai_agent_menu(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    if not AI_AGENT_ENABLED:
+        return await c.message.answer("AI 管家未开启。")
+
+    uid = c.from_user.id
+    user_state[uid] = "ai_agent"
+    temp[uid] = {}
+    await c.message.answer(
+        "🧠 AI管家已开启。\n"
+        "你可以直接输入要求，例如：\n"
+        "- 帮我添加关键词 上課\n"
+        "- 把当前群改名为 xxx\n"
+        "- 设置欢迎词为 ...\n"
+        "- 锁群\n"
+        "- 开群\n"
+        "- 如何添加关键词？\n\n"
+        "输入 /cancel 退出。"
+    )
 
 
 @dp.callback_query(F.data == "group_list")
@@ -870,6 +1336,49 @@ async def pick_group(c: types.CallbackQuery):
         f"✅ 已选择群组：\n{title}\n\n{t(uid, 'home')}",
         reply_markup=start_menu_kb(uid)
     )
+
+
+@dp.callback_query(F.data == "group_rename")
+async def group_rename(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    uid = c.from_user.id
+    chat_id = selected_group.get(uid)
+    if not chat_id:
+        return await c.message.answer("请先选择群组。")
+    user_state[uid] = "group_rename"
+    temp[uid] = {"chat_id": chat_id}
+    await c.message.answer("请输入新的群名：")
+
+
+@dp.callback_query(F.data == "group_lock")
+async def group_lock_cb(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    uid = c.from_user.id
+    chat_id = selected_group.get(uid)
+    if not chat_id:
+        return await c.message.answer("请先选择群组。")
+    try:
+        await lock_group(chat_id)
+        await c.message.answer("🔒 已锁群。")
+    except Exception as e:
+        await c.message.answer(f"❌ 锁群失败：{e}")
+
+
+@dp.callback_query(F.data == "group_unlock")
+async def group_unlock_cb(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    uid = c.from_user.id
+    chat_id = selected_group.get(uid)
+    if not chat_id:
+        return await c.message.answer("请先选择群组。")
+    try:
+        await unlock_group(chat_id)
+        await c.message.answer("🔓 已开群。")
+    except Exception as e:
+        await c.message.answer(f"❌ 开群失败：{e}")
 
 
 @dp.callback_query(F.data == "lang_vi")
@@ -1083,7 +1592,21 @@ async def wl_text(c: types.CallbackQuery):
     uid = c.from_user.id
     user_state[uid] = "wl_edit_text"
     temp[uid] = {"id": wid}
-    await c.message.answer("请输入欢迎文本：")
+    await c.message.answer(
+        "请输入欢迎文本：\n\n"
+        "支持变量：\n"
+        "(*name*) / {mention}        - 提及新成员\n"
+        "(*fullname*) / {full_name}  - 完整名字\n"
+        "(*username*) / {username}   - 用户名\n"
+        "(*rand*) / {rand_name}      - 随机称呼\n"
+        "(*group*) / {chat_title}    - 当前群名\n"
+        "(*groupid*) / {chat_id}     - 当前群ID\n\n"
+        "示例：\n"
+        "欢迎 (*name*) 来到\n"
+        "(*group*)\n"
+        "群ID\n"
+        "群ID-(*groupid*)"
+    )
 
 
 @dp.callback_query(F.data.startswith("wl_img_"))
@@ -1107,8 +1630,9 @@ async def wl_btn(c: types.CallbackQuery):
     temp[uid] = {"id": wid}
     await c.message.answer(
         "按钮格式：\n"
-        "Google - https://google.com && YouTube - https://youtube.com\n"
-        "每一行代表一排按钮。"
+        "新币供需 - https://t.me/gqdh && 新币公群 - https://t.me/gqdh\n"
+        "每一行代表一排按钮。\n\n"
+        "如果留空，系统会自动使用默认2个按钮。"
     )
 
 
@@ -1132,7 +1656,19 @@ async def wl_pre(c: types.CallbackQuery):
         w = await db.get(WelcomeSetting, wid)
     if not w:
         return await c.message.answer("不存在。")
-    await send_preview(chat_id=c.from_user.id, text=w.text, image=w.image, button=w.button)
+    preview_text = build_welcome_text(
+        template=w.text or "欢迎 (*name*) 来到\n(*group*)\n群ID-(*groupid*)",
+        user=c.from_user,
+        chat_title="测试群组",
+        chat_id="-1001234567890"
+    )
+    await send_preview(
+        chat_id=c.from_user.id,
+        text=preview_text,
+        image=w.image,
+        button=(w.button or "").strip() or default_welcome_button_text(),
+        parse_mode="HTML"
+    )
 
 
 @dp.callback_query(F.data.startswith("wl_del_"))
@@ -1327,6 +1863,114 @@ async def auto_del(c: types.CallbackQuery):
         await db.execute(delete(AutoPost).where(AutoPost.id == pid))
         await db.commit()
     await show_auto_list(c.message)
+
+
+# ======================
+# BANNED WORD MENU
+# ======================
+
+@dp.callback_query(F.data == "ban_menu")
+async def ban_menu(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    await safe_edit(c.message, "🚫 禁词管理", reply_markup=ban_menu_kb())
+
+
+@dp.callback_query(F.data == "ban_add")
+async def ban_add(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    uid = c.from_user.id
+    user_state[uid] = "ban_add"
+    temp[uid] = {}
+    await c.message.answer("请输入禁词，每行一个：")
+
+
+@dp.callback_query(F.data == "ban_list")
+async def ban_list(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    await show_banned_list(c.message)
+
+
+@dp.callback_query(F.data.startswith("ban_del_"))
+async def ban_del(c: types.CallbackQuery):
+    if not await allowed_or_ignore(c):
+        return
+    bid = int(c.data.split("_")[-1])
+    async with SessionLocal() as db:
+        await db.execute(delete(BannedWord).where(BannedWord.id == bid))
+        await db.commit()
+    await show_banned_list(c.message)
+
+
+@dp.callback_query(F.data == "ban_noop")
+async def ban_noop(c: types.CallbackQuery):
+    await ack(c)
+
+
+# ======================
+# QUICK ACTIONS
+# ======================
+
+@dp.message(F.text.regexp(r"(?i)^ghimmes$"))
+async def pin_replied_message(m: types.Message):
+    if m.chat.type not in ("group", "supergroup"):
+        return await m.answer("该命令只能在群组中使用。")
+
+    if not m.reply_to_message:
+        return await m.answer("请回复要置顶的消息，然后发送 ghimmes")
+
+    if not await is_chat_admin(bot, m.chat.id, m.from_user.id):
+        return await m.answer("❌ 只有群管理员可以使用。")
+
+    try:
+        await bot.pin_chat_message(
+            chat_id=m.chat.id,
+            message_id=m.reply_to_message.message_id,
+            disable_notification=False
+        )
+        with contextlib.suppress(Exception):
+            await m.delete()
+    except Exception as e:
+        await m.answer(f"❌ 置顶失败：{e}")
+
+
+@dp.message(F.text.regexp(r"^\s*担保表单"))
+async def auto_rename_from_form(m: types.Message):
+    if not m.from_user or not m.text:
+        return
+
+    if m.chat.type not in ("group", "supergroup"):
+        return await m.answer("该功能只能在群组中使用。")
+
+    if not await is_chat_admin(bot, m.chat.id, m.from_user.id):
+        return await m.answer("❌ 只有群管理员可以提交担保表单。")
+
+    data = parse_guarantee_form(m.text)
+
+    required = ["组别", "名字", "编号", "规则"]
+    missing = [x for x in required if not data.get(x)]
+    if missing:
+        return await m.answer("❌ 缺少字段：" + "，".join(missing))
+
+    new_title = build_group_title_from_form(data)
+
+    try:
+        await bot.set_chat_title(chat_id=m.chat.id, title=new_title)
+
+        async with SessionLocal() as db:
+            row = (await db.execute(
+                select(BotGroup).where(BotGroup.chat_id == str(m.chat.id))
+            )).scalars().first()
+            if row:
+                row.title = new_title
+                row.updated_at = int(time.time())
+                await db.commit()
+
+        await m.answer(f"担保规则写入成功\n{new_title}")
+    except Exception as e:
+        await m.answer(f"❌ 修改群名失败：{e}")
 
 
 # ======================
@@ -1609,8 +2253,9 @@ async def all_messages(m: types.Message):
     uid = m.from_user.id
     state = user_state.get(uid)
     text_ = (m.text or m.caption or "").strip()
+    is_admin_user = is_allowed_user(uid)
 
-    if m.chat.type == "private" and not is_allowed_user(uid):
+    if m.chat.type == "private" and not is_admin_user:
         if not text_ or text_.startswith("/"):
             return
         await m.answer(
@@ -1620,13 +2265,20 @@ async def all_messages(m: types.Message):
         )
         return
 
-    if not is_allowed_user(uid):
+    if text_ == "/start":
+        reset(uid)
+        return await start(m)
+
+    if text_ == "/cancel":
+        reset(uid)
+        if is_admin_user:
+            return await m.answer("已取消操作。", reply_markup=start_menu_kb(uid))
         return
 
     print(f"[MESSAGE] chat={m.chat.id} user={uid} text={m.text!r} state={state}")
 
     # ---- AI ----
-    if state == "ai_prompt":
+    if is_admin_user and state == "ai_prompt":
         if not openai_client:
             reset(uid)
             return await m.answer(t(uid, "ai_missing"), reply_markup=start_menu_kb(uid))
@@ -1661,8 +2313,52 @@ async def all_messages(m: types.Message):
             reset(uid)
             return await m.answer(t(uid, "ai_error"), reply_markup=start_menu_kb(uid))
 
+    # ---- AI AGENT ----
+    if is_admin_user and state == "ai_agent":
+        user_text = (m.text or m.caption or "").strip()
+        if not user_text:
+            return await m.answer("请输入你的要求。")
+
+        result = await ai_agent_parse(user_text)
+
+        if result.get("need_more"):
+            return await m.answer(result.get("question") or "请补充更多信息。")
+
+        action = result.get("action", "help")
+        params = result.get("params", {}) or {}
+
+        if action == "help":
+            reply = result.get("reply") or "请直接说你要做什么。"
+            return await m.answer(reply)
+
+        if AI_AGENT_CONFIRM_REQUIRED and result.get("need_confirm"):
+            temp[uid] = {
+                "pending_ai_action": action,
+                "pending_ai_params": params
+            }
+            user_state[uid] = "ai_agent_confirm"
+            return await m.answer(
+                f"⚠️ 即将执行操作：{action}\n"
+                f"参数：{params}\n\n"
+                f"请输入 确认 执行，或 /cancel 取消。"
+            )
+
+        return await execute_ai_action(m, uid, action, params)
+
+    if is_admin_user and state == "ai_agent_confirm":
+        text_in = (m.text or "").strip()
+        if text_in not in ("确认", "confirm", "yes", "ok"):
+            return await m.answer("未确认执行。请输入 确认，或 /cancel 取消。")
+
+        action = temp.get(uid, {}).get("pending_ai_action")
+        params = temp.get(uid, {}).get("pending_ai_params", {}) or {}
+
+        user_state[uid] = "ai_agent"
+        temp[uid] = {}
+        return await execute_ai_action(m, uid, action, params)
+
     # ---- KEYWORD ----
-    if state == "kw_add_key":
+    if is_admin_user and state == "kw_add_key":
         raw = (m.text or "").strip()
         if not raw:
             return await m.answer("关键词不能为空。")
@@ -1671,26 +2367,101 @@ async def all_messages(m: types.Message):
         if not keys:
             return await m.answer("关键词不能为空。")
 
-        added = 0
-        existed = 0
+        if len(keys) > 1:
+            added = 0
+            existed = 0
+            async with SessionLocal() as db:
+                for key in keys:
+                    exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
+                    if exists:
+                        existed += 1
+                        continue
+                    db.add(Keyword(key=key, mode="exact", active=1, text="", image="", button=""))
+                    added += 1
+                await db.commit()
+
+            reset(uid)
+            await m.answer(f"已添加 {added} 个关键词。\n已跳过 {existed} 个已存在关键词。")
+            return await show_kw_list(m)
+
+        key = keys[0]
+        async with SessionLocal() as db:
+            exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
+            if exists:
+                return await m.answer("关键词已存在，请输入其他关键词。")
+
+            row = Keyword(key=key, mode="exact", active=1, text="", image="", button="")
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+
+        user_state[uid] = "kw_add_text"
+        temp[uid] = {"id": row.id}
+        return await m.answer("已保存关键词。\n请输入回复文本，若跳过请输入 skip")
+
+    if is_admin_user and state == "kw_add_text":
+        kid = temp[uid]["id"]
+        value = (m.text or "").strip()
 
         async with SessionLocal() as db:
-            for key in keys:
-                exists = (await db.execute(select(Keyword).where(Keyword.key == key))).scalars().first()
-                if exists:
-                    existed += 1
-                    continue
-                db.add(Keyword(key=key, mode="exact", active=1, text="", image="", button=""))
-                added += 1
-            await db.commit()
+            k = await db.get(Keyword, kid)
+            if not k:
+                reset(uid)
+                return await m.answer("关键词不存在。")
 
-        reset(uid)
+            if value.lower() != "skip":
+                k.text = value
+                await db.commit()
+
+        user_state[uid] = "kw_add_image"
+        temp[uid] = {"id": kid}
+        return await m.answer("请发送图片，或输入图片 URL / file_id。\n若跳过请输入 skip")
+
+    if is_admin_user and state == "kw_add_image":
+        kid = temp[uid]["id"]
+        raw = (m.text or "").strip().lower()
+
+        image = None if raw == "skip" else extract_image_from_message(m)
+        if raw != "skip" and not image:
+            return await m.answer("请发送图片，或输入图片 URL / file_id，若跳过请输入 skip")
+
+        async with SessionLocal() as db:
+            k = await db.get(Keyword, kid)
+            if not k:
+                reset(uid)
+                return await m.answer("关键词不存在。")
+            if image:
+                k.image = image
+                await db.commit()
+
+        user_state[uid] = "kw_add_button"
+        temp[uid] = {"id": kid}
         return await m.answer(
-            f"已添加 {added} 个关键词。\n已跳过 {existed} 个已存在关键词。",
-            reply_markup=start_menu_kb(uid)
+            "请输入按钮。\n"
+            "格式：Google - https://google.com && YouTube - https://youtube.com\n"
+            "每一行代表一排按钮。\n"
+            "若跳过请输入 skip"
         )
 
-    if state == "kw_edit_key":
+    if is_admin_user and state == "kw_add_button":
+        kid = temp[uid]["id"]
+        value = (m.text or "").strip()
+
+        async with SessionLocal() as db:
+            k = await db.get(Keyword, kid)
+            if not k:
+                reset(uid)
+                return await m.answer("关键词不存在。")
+
+            if value.lower() != "skip":
+                k.button = value
+                await db.commit()
+
+        reset(uid)
+        await m.answer("关键词创建完成。")
+        return await show_kw_view(m, kid)
+
+    if is_admin_user and state == "kw_edit_key":
         kid = temp[uid]["id"]
         key = (m.text or "").strip()
         if not key:
@@ -1709,9 +2480,10 @@ async def all_messages(m: types.Message):
                 await db.commit()
 
         reset(uid)
-        return await m.answer("关键词已更新。", reply_markup=start_menu_kb(uid))
+        await m.answer("关键词已更新。")
+        return await show_kw_view(m, kid)
 
-    if state == "kw_edit_text":
+    if is_admin_user and state == "kw_edit_text":
         kid = temp[uid]["id"]
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
@@ -1719,9 +2491,10 @@ async def all_messages(m: types.Message):
                 k.text = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("文本已更新。", reply_markup=start_menu_kb(uid))
+        await m.answer("文本已更新。")
+        return await show_kw_view(m, kid)
 
-    if state == "kw_edit_image":
+    if is_admin_user and state == "kw_edit_image":
         kid = temp[uid]["id"]
         image = extract_image_from_message(m)
         if not image:
@@ -1732,9 +2505,10 @@ async def all_messages(m: types.Message):
                 k.image = image
                 await db.commit()
         reset(uid)
-        return await m.answer("媒体已更新。", reply_markup=start_menu_kb(uid))
+        await m.answer("媒体已更新。")
+        return await show_kw_view(m, kid)
 
-    if state == "kw_edit_button":
+    if is_admin_user and state == "kw_edit_button":
         kid = temp[uid]["id"]
         async with SessionLocal() as db:
             k = await db.get(Keyword, kid)
@@ -1742,10 +2516,56 @@ async def all_messages(m: types.Message):
                 k.button = m.text or ""
                 await db.commit()
         reset(uid)
-        return await m.answer("按钮已更新。", reply_markup=start_menu_kb(uid))
+        await m.answer("按钮已更新。")
+        return await show_kw_view(m, kid)
+
+    # ---- BANNED WORDS ----
+    if is_admin_user and state == "ban_add":
+        raw = (m.text or "").strip()
+        words = [x.strip().lower() for x in raw.splitlines() if x.strip()]
+        if not words:
+            return await m.answer("禁词不能为空。")
+
+        added = 0
+        existed = 0
+
+        async with SessionLocal() as db:
+            for word in words:
+                row = (await db.execute(select(BannedWord).where(BannedWord.word == word))).scalars().first()
+                if row:
+                    existed += 1
+                    continue
+                db.add(BannedWord(word=word))
+                added += 1
+            await db.commit()
+
+        reset(uid)
+        await m.answer(f"已添加 {added} 个禁词，跳过 {existed} 个已存在禁词。")
+        return await show_banned_list(m)
+
+    # ---- GROUP RENAME ----
+    if is_admin_user and state == "group_rename":
+        chat_id = temp[uid]["chat_id"]
+        new_title = (m.text or "").strip()
+        if not new_title:
+            return await m.answer("群名不能为空。")
+
+        try:
+            await bot.set_chat_title(chat_id=chat_id, title=new_title[:128])
+            async with SessionLocal() as db:
+                row = (await db.execute(select(BotGroup).where(BotGroup.chat_id == str(chat_id)))).scalars().first()
+                if row:
+                    row.title = new_title[:128]
+                    row.updated_at = int(time.time())
+                    await db.commit()
+            reset(uid)
+            return await m.answer(f"✅ 群名已更新：{new_title}", reply_markup=start_menu_kb(uid))
+        except Exception as e:
+            reset(uid)
+            return await m.answer(f"❌ 修改群名失败：{e}", reply_markup=start_menu_kb(uid))
 
     # ---- WELCOME ----
-    if state == "wl_add_chat":
+    if is_admin_user and state == "wl_add_chat":
         chat_id = (m.text or "").strip()
         if not chat_id:
             return await m.answer("chat_id 不能为空。")
@@ -1758,7 +2578,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("欢迎配置已创建。", reply_markup=start_menu_kb(uid))
 
-    if state == "wl_edit_text":
+    if is_admin_user and state == "wl_edit_text":
         wid = temp[uid]["id"]
         async with SessionLocal() as db:
             w = await db.get(WelcomeSetting, wid)
@@ -1768,7 +2588,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("欢迎文本已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "wl_edit_image":
+    if is_admin_user and state == "wl_edit_image":
         wid = temp[uid]["id"]
         image = extract_image_from_message(m)
         if not image:
@@ -1781,7 +2601,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("媒体已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "wl_edit_button":
+    if is_admin_user and state == "wl_edit_button":
         wid = temp[uid]["id"]
         async with SessionLocal() as db:
             w = await db.get(WelcomeSetting, wid)
@@ -1791,7 +2611,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("按钮已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "wl_edit_delete_after":
+    if is_admin_user and state == "wl_edit_delete_after":
         wid = temp[uid]["id"]
         try:
             minutes = int((m.text or "").strip())
@@ -1808,7 +2628,7 @@ async def all_messages(m: types.Message):
         return await m.answer("删除时间已更新。", reply_markup=start_menu_kb(uid))
 
     # ---- AUTO ----
-    if state == "auto_add_chat":
+    if is_admin_user and state == "auto_add_chat":
         chat_id = (m.text or "").strip()
         if not chat_id:
             return await m.answer("chat_id 不能为空。")
@@ -1818,7 +2638,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("定时发送已创建。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_text":
+    if is_admin_user and state == "auto_edit_text":
         pid = temp[uid]["id"]
         async with SessionLocal() as db:
             p = await db.get(AutoPost, pid)
@@ -1828,7 +2648,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("文本已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_image":
+    if is_admin_user and state == "auto_edit_image":
         pid = temp[uid]["id"]
         image = extract_image_from_message(m)
         if not image:
@@ -1841,7 +2661,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("媒体已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_button":
+    if is_admin_user and state == "auto_edit_button":
         pid = temp[uid]["id"]
         async with SessionLocal() as db:
             p = await db.get(AutoPost, pid)
@@ -1851,7 +2671,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("按钮已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_chat":
+    if is_admin_user and state == "auto_edit_chat":
         pid = temp[uid]["id"]
         chat_id = (m.text or "").strip()
         if not chat_id:
@@ -1864,7 +2684,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("chat_id 已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_interval":
+    if is_admin_user and state == "auto_edit_interval":
         pid = temp[uid]["id"]
         try:
             interval = int((m.text or "").strip())
@@ -1880,7 +2700,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("间隔时间已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_start":
+    if is_admin_user and state == "auto_edit_start":
         pid = temp[uid]["id"]
         if not parse_dt(m.text or ""):
             return await m.answer("格式错误。请使用：YYYY-MM-DD HH:MM")
@@ -1892,7 +2712,7 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("开始时间已更新。", reply_markup=start_menu_kb(uid))
 
-    if state == "auto_edit_end":
+    if is_admin_user and state == "auto_edit_end":
         pid = temp[uid]["id"]
         if not parse_dt(m.text or ""):
             return await m.answer("格式错误。请使用：YYYY-MM-DD HH:MM")
@@ -1904,7 +2724,20 @@ async def all_messages(m: types.Message):
         reset(uid)
         return await m.answer("结束时间已更新。", reply_markup=start_menu_kb(uid))
 
-    # ---- KEYWORD AUTO REPLY ----
+    # ---- BANNED WORDS CHECK FOR ALL GROUP USERS ----
+    if m.chat.type in ("group", "supergroup") and text_ and not text_.startswith("/"):
+        async with SessionLocal() as db:
+            banned_rows = (await db.execute(select(BannedWord))).scalars().all()
+
+        lower_text = text_.lower()
+        for row in banned_rows:
+            word = (row.word or "").strip().lower()
+            if word and word in lower_text:
+                with contextlib.suppress(Exception):
+                    await m.delete()
+                return
+
+    # ---- KEYWORD AUTO REPLY FOR ALL USERS ----
     if not text_ or text_.startswith("/"):
         return
 
@@ -1948,7 +2781,7 @@ async def all_messages(m: types.Message):
 
 @dp.message(F.new_chat_members)
 async def welcome_new_member(m: types.Message):
-    if not m.chat:
+    if not m.chat or not m.new_chat_members:
         return
 
     chat_id = str(m.chat.id)
@@ -1964,23 +2797,43 @@ async def welcome_new_member(m: types.Message):
     if not w:
         return
 
-    try:
-        msg = await send_preview(chat_id=m.chat.id, text=w.text, image=w.image, button=w.button)
+    current_chat_title = m.chat.title or ""
 
-        if w.pin:
-            with contextlib.suppress(Exception):
-                await bot.pin_chat_message(chat_id=m.chat.id, message_id=msg.message_id)
+    for new_user in m.new_chat_members:
+        try:
+            welcome_text = build_welcome_text(
+                template=w.text or "欢迎 (*name*) 来到\n(*group*)\n群ID\n群ID-(*groupid*)",
+                user=new_user,
+                chat_title=current_chat_title,
+                chat_id=m.chat.id
+            )
 
-        if w.delete_after and w.delete_after > 0:
-            async def later_delete():
-                await asyncio.sleep(w.delete_after * 60)
+            btn_text = (w.button or "").strip() or default_welcome_button_text()
+
+            msg = await send_preview(
+                chat_id=m.chat.id,
+                text=welcome_text,
+                image=w.image,
+                button=btn_text,
+                parse_mode="HTML"
+            )
+
+            if w.pin:
                 with contextlib.suppress(Exception):
-                    await bot.delete_message(chat_id=m.chat.id, message_id=msg.message_id)
+                    await bot.pin_chat_message(chat_id=m.chat.id, message_id=msg.message_id)
 
-            asyncio.create_task(later_delete())
+            if w.delete_after and w.delete_after > 0:
+                async def later_delete(chat_id_, msg_id_, delay_):
+                    await asyncio.sleep(delay_)
+                    with contextlib.suppress(Exception):
+                        await bot.delete_message(chat_id=chat_id_, message_id=msg_id_)
 
-    except Exception as e:
-        print(f"welcome 错误: {e}")
+                asyncio.create_task(
+                    later_delete(m.chat.id, msg.message_id, w.delete_after * 60)
+                )
+
+        except Exception as e:
+            print(f"welcome 错误: {e}")
 
 
 # ======================

@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.client.default import DefaultBotProperties
 
 from sqlalchemy import (
     Column, Integer, String, Text, select, delete, Boolean
@@ -46,7 +47,11 @@ engine = create_async_engine(
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
 
 # ======================
@@ -67,8 +72,7 @@ worker_task = None
 # ======================
 STRANGER_START_TEXT = "欢迎使用机器人，请点击下方按钮："
 INIT_GROUP_TEXT = "组防骗助手为您服务,我正在进行相关初始化配置请稍后"
-
-URL_RE = re.compile(r"(https?://\S+|tg://\S+|www\.\S+)", re.IGNORECASE)
+URL_RE = re.compile(r"(https?://\S+|tg://\S+|www\.\S+)", re.I)
 
 # ======================
 # MODELS

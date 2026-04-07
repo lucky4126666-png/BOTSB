@@ -1,10 +1,9 @@
 fastapi
 uvicorn
+python-multipart
 aiogram
 sqlalchemy
 asyncpg
-python-dotenv
-jinja2
-openai
 redis
-python-multipart
+openai
+jinja2
